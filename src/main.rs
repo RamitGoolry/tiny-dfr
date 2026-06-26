@@ -989,7 +989,9 @@ fn real_main(drm: &mut DrmBackend) {
             match event {
                 Event::Device(DeviceEvent::Added(evt)) => {
                     let dev = evt.device();
-                    if dev.name().contains(" Touch Bar") {
+                    // T2/Asahi name their touch surface "... Touch Bar"; the T1
+                    // (2017) iBridge touch surface is "Apple Inc. iBridge Touchpad".
+                    if dev.name().contains(" Touch Bar") || dev.name().contains("iBridge Touchpad") {
                         digitizer = Some(dev);
                     }
                 }
