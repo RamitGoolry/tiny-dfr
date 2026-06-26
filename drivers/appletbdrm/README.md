@@ -32,10 +32,26 @@ Swapping in the patched module at runtime: stop tiny-dfr, unbind/unload the stoc
 
 ## Why we forked it
 The stock driver flushes each frame **synchronously** and waits for a per-frame
-device `UPDATE_COMPLETE` ack (`appletbdrm_read_response`, 1000 ms timeout). A slow
-ack stalls the whole pipe for up to ~1 s, which shows up as a Touch Bar button's
-highlight "sticking" — and would make a continuously-updating slider hitch. The
-fix work targets that ack/flush path (bounded timeout + skip-to-latest frame).
+device `UPDATE_COMPLETE` ack (`appletbdrm_read_response`, 1000 ms timeout) — and
+this runs inside a *blocking* atomic commit, so the wait sits on the critical path
+of userspace's DIRTYFB ioctl. A slow ack stalls the compositor's render loop for
+up to ~1 s, which shows up as a Touch Bar button highlight "sticking" and would
+make a continuously-updating slider hitch.
+
+## What we tried, and what we learned
+**Patch A — bounded ack timeout (100 ms) + stale-ack drain — TRIED AND REVERTED.**
+Capping the ack wait did remove the 1 s freeze, but it broke the device: the
+active (pressed) highlight stopped drawing *and* touch presses started dropping.
+The iBridge is a **single USB device that serves both the display (this driver)
+and the touch surface**, and abandoning/draining the appletbdrm ack mid-protocol
+desyncs the firmware enough to disturb both halves.
+
+**Lesson: the per-frame ack is load-bearing across the whole device — it cannot
+be shortened or abandoned.** The only viable direction is to keep the *full*
+handshake but move it **off the commit's critical path** (Option B): a
+non-blocking commit + a worker doing the complete send+ack, optionally coalescing
+to the latest frame. That's real kernel-threading work, **deferred** until a
+slider actually needs it.
 
 ## Patches vs upstream
-(none yet — this is the unmodified vendored baseline)
+(none — unmodified baseline. Patch A was tried and reverted; see above.)

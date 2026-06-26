@@ -13,5 +13,5 @@ clean:
 
 # Install into the running kernel's extramodules tree + refresh moddep.
 install: all
-	$(MAKE) -C $(KDIR) M=$(PWD) modules_install
+	$(MAKE) -C $(KDIR) M=$(PWD) INSTALL_MOD_DIR=updates modules_install
 	depmod -a
