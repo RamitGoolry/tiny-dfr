@@ -79,7 +79,9 @@ impl BacklightManager {
         // T1 Macs (appletbdrm) have no dedicated Touch Bar backlight sysfs device;
         // tolerate its absence and just skip Touch Bar brightness control there.
         let bl_path = find_backlight()
-            .inspect_err(|e| eprintln!("No Touch Bar backlight device, brightness control disabled: {e}"))
+            .inspect_err(|e| {
+                eprintln!("No Touch Bar backlight device, brightness control disabled: {e}")
+            })
             .ok();
         let display_bl_path = find_display_backlight()
             .inspect_err(|e| eprintln!("Failed to find display backlight sysfs path: {e}"))

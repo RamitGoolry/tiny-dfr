@@ -331,15 +331,25 @@ impl Button {
         let mut plain = Vec::new();
         let mut charging = Vec::new();
         for icon in [
-            "battery_0_bar", "battery_1_bar", "battery_2_bar", "battery_3_bar",
-            "battery_4_bar", "battery_5_bar", "battery_6_bar", "battery_full",
+            "battery_0_bar",
+            "battery_1_bar",
+            "battery_2_bar",
+            "battery_3_bar",
+            "battery_4_bar",
+            "battery_5_bar",
+            "battery_6_bar",
+            "battery_full",
         ] {
             plain.push(Self::load_battery_image(icon, theme.as_ref()));
         }
         for icon in [
-            "battery_charging_20", "battery_charging_30", "battery_charging_50",
-            "battery_charging_60", "battery_charging_80",
-            "battery_charging_90", "battery_charging_full",
+            "battery_charging_20",
+            "battery_charging_30",
+            "battery_charging_50",
+            "battery_charging_60",
+            "battery_charging_80",
+            "battery_charging_90",
+            "battery_charging_full",
         ] {
             charging.push(Self::load_battery_image(icon, theme.as_ref()));
         }
@@ -397,12 +407,12 @@ impl Button {
         match &self.image {
             ButtonImage::Time(items, _) => items.iter().any(|item| {
                 use chrono::format::{Item, Numeric};
-                match item {
+                matches!(
+                    item,
                     Item::Numeric(Numeric::Second, _)
-                    | Item::Numeric(Numeric::Nanosecond, _)
-                    | Item::Numeric(Numeric::Timestamp, _) => true,
-                    _ => false,
-                }
+                        | Item::Numeric(Numeric::Nanosecond, _)
+                        | Item::Numeric(Numeric::Timestamp, _)
+                )
             }),
             _ => false,
         }
@@ -991,14 +1001,19 @@ fn real_main(drm: &mut DrmBackend) {
                     let dev = evt.device();
                     // T2/Asahi name their touch surface "... Touch Bar"; the T1
                     // (2017) iBridge touch surface is "Apple Inc. iBridge Touchpad".
-                    if dev.name().contains(" Touch Bar") || dev.name().contains("iBridge Touchpad") {
+                    if dev.name().contains(" Touch Bar") || dev.name().contains("iBridge Touchpad")
+                    {
                         digitizer = Some(dev);
                     }
                 }
                 Event::Keyboard(KeyboardEvent::Key(key)) => {
                     if key.key() == Key::Fn as u32 {
-                        if cfg.double_press_switch_layers > 0 && key.key_state() == KeyState::Pressed {
-                            if last.elapsed() < Duration::from_millis(cfg.double_press_switch_layers.into()) {
+                        if cfg.double_press_switch_layers > 0
+                            && key.key_state() == KeyState::Pressed
+                        {
+                            if last.elapsed()
+                                < Duration::from_millis(cfg.double_press_switch_layers.into())
+                            {
                                 layers.swap(0, 1);
                             }
                             last = Instant::now();
@@ -1042,11 +1057,18 @@ fn real_main(drm: &mut DrmBackend) {
                             layers[layer].buttons[btn].1.set_active(&mut uinput, hit);
                         }
                         TouchEvent::Up(up) => {
-                            if !touches.contains_key(&up.seat_slot()) {
-                                continue;
+                            if let Some((layer, btn)) = touches.remove(&up.seat_slot()) {
+                                layers[layer].buttons[btn].1.set_active(&mut uinput, false);
                             }
-                            let (layer, btn) = *touches.get(&up.seat_slot()).unwrap();
-                            layers[layer].buttons[btn].1.set_active(&mut uinput, false);
+                        }
+                        TouchEvent::Cancel(cancel) => {
+                            // libinput can cancel a touch instead of ending it with Up
+                            // (palm rejection, gesture reinterpretation, hardware quirks).
+                            // Without handling it, the button stays visually active AND its
+                            // key stays logically held down. Treat it exactly like Up.
+                            if let Some((layer, btn)) = touches.remove(&cancel.seat_slot()) {
+                                layers[layer].buttons[btn].1.set_active(&mut uinput, false);
+                            }
                         }
                         _ => {}
                     }
