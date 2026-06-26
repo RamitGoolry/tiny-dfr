@@ -70,25 +70,35 @@ pub struct BacklightManager {
     max_bl: u32,
     current_bl: u32,
     lid_state: SwitchState,
-    bl_file: File,
+    bl_file: Option<File>,
     display_bl_path: Option<PathBuf>,
 }
 
 impl BacklightManager {
     pub fn new() -> BacklightManager {
-        let bl_path = find_backlight().unwrap();
+        // T1 Macs (appletbdrm) have no dedicated Touch Bar backlight sysfs device;
+        // tolerate its absence and just skip Touch Bar brightness control there.
+        let bl_path = find_backlight()
+            .inspect_err(|e| eprintln!("No Touch Bar backlight device, brightness control disabled: {e}"))
+            .ok();
         let display_bl_path = find_display_backlight()
             .inspect_err(|e| eprintln!("Failed to find display backlight sysfs path: {e}"))
             .ok();
-        let bl_file = OpenOptions::new()
-            .write(true)
-            .open(bl_path.join("brightness"))
-            .unwrap();
+        let bl_file = bl_path.as_ref().map(|p| {
+            OpenOptions::new()
+                .write(true)
+                .open(p.join("brightness"))
+                .unwrap()
+        });
+        let (max_bl, current_bl) = match &bl_path {
+            Some(p) => (read_attr(p, "max_brightness"), read_attr(p, "brightness")),
+            None => (MAX_TOUCH_BAR_BRIGHTNESS, MAX_TOUCH_BAR_BRIGHTNESS),
+        };
         BacklightManager {
             bl_file,
             lid_state: SwitchState::Off,
-            max_bl: read_attr(&bl_path, "max_brightness"),
-            current_bl: read_attr(&bl_path, "brightness"),
+            max_bl,
+            current_bl,
             last_active: Instant::now(),
             display_bl_path,
         }
@@ -141,7 +151,9 @@ impl BacklightManager {
         );
         if self.current_bl != new_bl {
             self.current_bl = new_bl;
-            set_backlight(&self.bl_file, self.current_bl);
+            if let Some(file) = &self.bl_file {
+                set_backlight(file, self.current_bl);
+            }
         }
     }
     pub fn current_bl(&self) -> u32 {
