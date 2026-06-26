@@ -3,6 +3,7 @@ use crate::FunctionLayer;
 use cairo::{Context, Surface};
 use drm::control::ClipRect;
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 /// A single bar layer: either a row of buttons or a full-bar slider widget.
 /// The wrapping enum lets the event loop stay layer-kind agnostic.
@@ -84,6 +85,9 @@ pub struct Slider {
     /// Level at the last draw, so a partial redraw only damages the strip the
     /// fill edge moved across (full-panel damage is ~1s on appletbdrm; small ~1ms).
     drawn_level: f64,
+    /// Time of the last repaint, to throttle the fill to ~30fps — the device can't
+    /// take a push per drag sample.
+    last_draw: Instant,
 }
 
 impl Slider {
@@ -94,6 +98,7 @@ impl Slider {
             grab: None,
             changed: true,
             drawn_level: 0.0,
+            last_draw: Instant::now(),
         }
     }
     /// Begin a drag: anchor at the current touch x and the current level so the
@@ -110,7 +115,11 @@ impl Slider {
             let new = (gl + (x - gx) / width).clamp(0.0, 1.0);
             if (new - self.level).abs() > f64::EPSILON {
                 self.level = new;
-                self.changed = true;
+                // Throttle repaints to ~30fps; brightness still updates every frame
+                // (the caller applies `level` directly), only the fill is limited.
+                if self.last_draw.elapsed() >= Duration::from_millis(33) {
+                    self.changed = true;
+                }
             }
         }
         self.level
@@ -169,6 +178,7 @@ impl Slider {
         };
         self.drawn_level = self.level;
         self.changed = false;
+        self.last_draw = Instant::now();
         clips
     }
 }
