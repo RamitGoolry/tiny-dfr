@@ -1,5 +1,5 @@
 use crate::fonts::{FontConfig, Pattern};
-use crate::layer::{Layer, LayerStore};
+use crate::layer::{Layer, LayerStore, Slider, SliderBackend};
 use crate::FunctionLayer;
 use anyhow::Error;
 use cairo::FontFace;
@@ -82,6 +82,9 @@ pub struct ButtonConfig {
     pub stretch: Option<usize>,
     pub icon_width: Option<i32>,
     pub icon_height: Option<i32>,
+    /// Touching this button opens the named layer (e.g. a slider) as a
+    /// momentary modal instead of sending a key.
+    pub open_layer: Option<String>,
 }
 
 fn load_font(name: &str) -> FontFace {
@@ -136,6 +139,7 @@ fn load_config(width: u16) -> (Config, LayerStore) {
                     battery: None,
                     icon_width: None,
                     icon_height: None,
+                    open_layer: None,
                 },
             );
         }
@@ -145,6 +149,11 @@ fn load_config(width: u16) -> (Config, LayerStore) {
     let mut registry = HashMap::new();
     registry.insert("media".to_string(), Layer::Buttons(media_layer));
     registry.insert("fkeys".to_string(), Layer::Buttons(fkey_layer));
+    // Built-in modal slider layers, entered via a button's `OpenLayer = "..."`.
+    registry.insert(
+        "brightness".to_string(),
+        Layer::Slider(Slider::new(SliderBackend::Brightness)),
+    );
     // base_order[0] = shown when Fn is not held; base_order[1] = shown while Fn held.
     let base_order = if base.media_layer_default.unwrap() {
         ["media".to_string(), "fkeys".to_string()]

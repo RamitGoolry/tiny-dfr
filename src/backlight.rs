@@ -27,6 +27,16 @@ fn read_attr(path: &Path, attr: &str) -> u32 {
         .unwrap_or_else(|_| panic!("Failed to parse {attr}"))
 }
 
+/// Like `read_attr` but never panics — for hot paths (e.g. the slider polling
+/// the current brightness) where a transient read failure should be tolerated.
+fn try_read_attr(path: &Path, attr: &str) -> Option<u32> {
+    fs::read_to_string(path.join(attr))
+        .ok()?
+        .trim()
+        .parse::<u32>()
+        .ok()
+}
+
 fn find_backlight() -> Result<PathBuf> {
     for entry in fs::read_dir("/sys/class/backlight/")? {
         let entry = entry?;
@@ -72,6 +82,8 @@ pub struct BacklightManager {
     lid_state: SwitchState,
     bl_file: Option<File>,
     display_bl_path: Option<PathBuf>,
+    display_bl_file: Option<File>,
+    display_max_bl: u32,
 }
 
 impl BacklightManager {
@@ -96,6 +108,18 @@ impl BacklightManager {
             Some(p) => (read_attr(p, "max_brightness"), read_attr(p, "brightness")),
             None => (MAX_TOUCH_BAR_BRIGHTNESS, MAX_TOUCH_BAR_BRIGHTNESS),
         };
+        // Display backlight write handle for the brightness slider, opened here
+        // (before the privilege drop) so the daemon can still write it as nobody.
+        let display_bl_file = display_bl_path.as_ref().and_then(|p| {
+            OpenOptions::new()
+                .write(true)
+                .open(p.join("brightness"))
+                .ok()
+        });
+        let display_max_bl = display_bl_path
+            .as_ref()
+            .map(|p| read_attr(p, "max_brightness"))
+            .unwrap_or(MAX_DISPLAY_BRIGHTNESS);
         BacklightManager {
             bl_file,
             lid_state: SwitchState::Off,
@@ -103,6 +127,8 @@ impl BacklightManager {
             current_bl,
             last_active: Instant::now(),
             display_bl_path,
+            display_bl_file,
+            display_max_bl,
         }
     }
     fn display_to_touchbar(display: u32, active_brightness: u32) -> u32 {
@@ -160,5 +186,22 @@ impl BacklightManager {
     }
     pub fn current_bl(&self) -> u32 {
         self.current_bl
+    }
+    /// Current display backlight level in 0.0..=1.0, read fresh from sysfs.
+    pub fn display_level(&self) -> f64 {
+        let cur = self
+            .display_bl_path
+            .as_ref()
+            .and_then(|p| try_read_attr(p, "brightness"))
+            .unwrap_or(0);
+        (cur as f64 / self.display_max_bl as f64).clamp(0.0, 1.0)
+    }
+    /// Set the display backlight from a 0.0..=1.0 level (clamped just above off
+    /// so the slider can never black the screen out completely).
+    pub fn set_display_level(&self, level: f64) {
+        if let Some(file) = &self.display_bl_file {
+            let value = (level.clamp(0.0, 1.0) * self.display_max_bl as f64).round() as u32;
+            set_backlight(file, value.max(1));
+        }
     }
 }
