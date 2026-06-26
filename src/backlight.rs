@@ -154,6 +154,11 @@ impl BacklightManager {
             _ => {}
         }
     }
+    /// Mark activity so the bar stays lit — called for raw digitizer touches,
+    /// which no longer go through libinput's `process_event`.
+    pub fn wake(&mut self) {
+        self.last_active = Instant::now();
+    }
     pub fn update_backlight(&mut self, cfg: &Config) {
         let since_last_active = (Instant::now() - self.last_active).as_millis() as u64;
         let new_bl = min(

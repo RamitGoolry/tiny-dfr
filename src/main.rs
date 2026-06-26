@@ -935,9 +935,7 @@ fn real_main(drm: &mut DrmBackend) {
     let mut rstate = ResolverState::default();
     let mut needs_complete_redraw = true;
 
-    let mut input_tb = Libinput::new_with_udev(Interface);
     let mut input_main = Libinput::new_with_udev(Interface);
-    input_tb.udev_assign_seat("seat-touchbar").unwrap();
     input_main.udev_assign_seat("seat0").unwrap();
     let udev_monitor = MonitorBuilder::new()
         .unwrap()
@@ -948,9 +946,6 @@ fn real_main(drm: &mut DrmBackend) {
     let epoll = Epoll::new(EpollCreateFlags::empty()).unwrap();
     epoll
         .add(input_main.as_fd(), EpollEvent::new(EpollFlags::EPOLLIN, 0))
-        .unwrap();
-    epoll
-        .add(input_tb.as_fd(), EpollEvent::new(EpollFlags::EPOLLIN, 1))
         .unwrap();
     epoll
         .add(cfg_mgr.fd(), EpollEvent::new(EpollFlags::EPOLLIN, 2))
@@ -1071,11 +1066,10 @@ fn real_main(drm: &mut DrmBackend) {
         _ = udev_monitor.iter().last();
 
         let t_in = Instant::now();
-        input_tb.dispatch().unwrap();
         input_main.dispatch().unwrap();
         let t_dispatch = t_in.elapsed();
         let mut n_events = 0u32;
-        for event in &mut input_tb.clone().chain(input_main.clone()) {
+        for event in &mut input_main.clone() {
             n_events += 1;
             backlight.process_event(&event);
             match event {
@@ -1123,6 +1117,7 @@ fn real_main(drm: &mut DrmBackend) {
                 samples.push(up);
             }
             for s in samples {
+                backlight.wake(); // any digitizer touch keeps the bar lit
                 let (x, y) = (s.x, s.y);
                 match s.phase {
                     TouchPhase::Down => {
