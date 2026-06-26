@@ -45,12 +45,14 @@ mod backlight;
 mod config;
 mod display;
 mod fonts;
+mod layer;
 mod pixel_shift;
 
 use crate::config::ConfigManager;
 use backlight::BacklightManager;
 use config::{ButtonConfig, Config};
 use display::DrmBackend;
+use layer::{Layer, ResolverState, TouchTarget};
 use pixel_shift::{PixelShiftManager, PIXEL_SHIFT_WIDTH_PX};
 
 const BUTTON_SPACING_PX: i32 = 16;
@@ -590,6 +592,25 @@ impl FunctionLayer {
             faster_refresh,
         }
     }
+    fn faster_refresh(&self) -> bool {
+        self.faster_refresh
+    }
+    fn displays_time(&self) -> bool {
+        self.displays_time
+    }
+    fn displays_battery(&self) -> bool {
+        self.displays_battery
+    }
+    fn any_changed(&self) -> bool {
+        self.buttons.iter().any(|b| b.1.changed)
+    }
+    fn mark_batteries_changed(&mut self) {
+        for button in &mut self.buttons {
+            if let ButtonImage::Battery(_, _, _) = button.1.image {
+                button.1.changed = true;
+            }
+        }
+    }
     fn draw(
         &mut self,
         config: &Config,
@@ -856,7 +877,7 @@ fn real_main(drm: &mut DrmBackend) {
     let mut uinput = UInputHandle::new(OpenOptions::new().write(true).open("/dev/uinput").unwrap());
     let mut backlight = BacklightManager::new();
     let mut cfg_mgr = ConfigManager::new();
-    let (mut cfg, mut layers) = cfg_mgr.load_config(width);
+    let (mut cfg, mut store) = cfg_mgr.load_config(width);
     let mut pixel_shift = PixelShiftManager::new();
     let mut last = Instant::now();
 
@@ -871,7 +892,7 @@ fn real_main(drm: &mut DrmBackend) {
 
     let mut surface =
         ImageSurface::create(Format::ARgb32, db_width as i32, db_height as i32).unwrap();
-    let mut active_layer = 0;
+    let mut rstate = ResolverState::default();
     let mut needs_complete_redraw = true;
 
     let mut input_tb = Libinput::new_with_udev(Interface);
@@ -922,16 +943,21 @@ fn real_main(drm: &mut DrmBackend) {
 
     let mut digitizer: Option<InputDevice> = None;
     let mut touches = HashMap::new();
-    let mut last_redraw_ts = if layers[active_layer].faster_refresh {
-        Local::now().second()
-    } else {
-        Local::now().minute()
+    let mut last_redraw_ts = {
+        let active = store.resolve(&rstate);
+        if store.get(&active).faster_refresh() {
+            Local::now().second()
+        } else {
+            Local::now().minute()
+        }
     };
     loop {
-        if cfg_mgr.update_config(&mut cfg, &mut layers, width) {
-            active_layer = 0;
+        if cfg_mgr.update_config(&mut cfg, &mut store, width) {
+            rstate = ResolverState::default();
+            touches.clear();
             needs_complete_redraw = true;
         }
+        let active = store.resolve(&rstate);
 
         let now = Local::now();
         let ms_left = ((60 - now.second()) * 1000) as i32;
@@ -945,30 +971,26 @@ fn real_main(drm: &mut DrmBackend) {
             next_timeout_ms = min(next_timeout_ms, pixel_shift_next_timeout_ms);
         }
 
-        let current_ts = if layers[active_layer].faster_refresh {
+        let current_ts = if store.get(&active).faster_refresh() {
             Local::now().second()
         } else {
             Local::now().minute()
         };
-        if layers[active_layer].displays_time && (current_ts != last_redraw_ts) {
+        if store.get(&active).displays_time() && (current_ts != last_redraw_ts) {
             needs_complete_redraw = true;
             last_redraw_ts = current_ts;
         }
-        if layers[active_layer].displays_battery {
-            for button in &mut layers[active_layer].buttons {
-                if let ButtonImage::Battery(_, _, _) = button.1.image {
-                    button.1.changed = true;
-                }
-            }
+        if store.get(&active).displays_battery() {
+            store.get_mut(&active).mark_batteries_changed();
         }
 
-        if needs_complete_redraw || layers[active_layer].buttons.iter().any(|b| b.1.changed) {
+        if needs_complete_redraw || store.get(&active).needs_redraw() {
             let shift = if cfg.enable_pixel_shift {
                 pixel_shift.get()
             } else {
                 (0.0, 0.0)
             };
-            let clips = layers[active_layer].draw(
+            let clips = store.get_mut(&active).draw(
                 &cfg,
                 width as i32,
                 height as i32,
@@ -1014,16 +1036,13 @@ fn real_main(drm: &mut DrmBackend) {
                             if last.elapsed()
                                 < Duration::from_millis(cfg.double_press_switch_layers.into())
                             {
-                                layers.swap(0, 1);
+                                store.base_order.swap(0, 1);
                             }
                             last = Instant::now();
                         }
-                        let new_layer = match key.key_state() {
-                            KeyState::Pressed => 1,
-                            KeyState::Released => 0,
-                        };
-                        if active_layer != new_layer {
-                            active_layer = new_layer;
+                        let fn_pressed = key.key_state() == KeyState::Pressed;
+                        if rstate.fn_pressed != fn_pressed {
+                            rstate.fn_pressed = fn_pressed;
                             needs_complete_redraw = true;
                         }
                     }
@@ -1036,29 +1055,53 @@ fn real_main(drm: &mut DrmBackend) {
                         TouchEvent::Down(dn) => {
                             let x = dn.x_transformed(width as u32);
                             let y = dn.y_transformed(height as u32);
-                            if let Some(btn) = layers[active_layer].hit(width, height, x, y, None) {
-                                touches.insert(dn.seat_slot(), (active_layer, btn));
-                                layers[active_layer].buttons[btn]
-                                    .1
-                                    .set_active(&mut uinput, true);
+                            let active = store.resolve(&rstate);
+                            let hit = match store.get(&active) {
+                                Layer::Buttons(fl) => fl.hit(width, height, x, y, None),
+                            };
+                            if let Some(btn) = hit {
+                                touches.insert(
+                                    dn.seat_slot(),
+                                    TouchTarget::Button {
+                                        layer: active.clone(),
+                                        btn,
+                                    },
+                                );
+                                match store.get_mut(&active) {
+                                    Layer::Buttons(fl) => {
+                                        fl.buttons[btn].1.set_active(&mut uinput, true)
+                                    }
+                                }
                             }
                         }
                         TouchEvent::Motion(mtn) => {
-                            if !touches.contains_key(&mtn.seat_slot()) {
-                                continue;
-                            }
-
+                            let (layer, btn) = match touches.get(&mtn.seat_slot()) {
+                                Some(TouchTarget::Button { layer, btn }) => (layer.clone(), *btn),
+                                None => continue,
+                            };
                             let x = mtn.x_transformed(width as u32);
                             let y = mtn.y_transformed(height as u32);
-                            let (layer, btn) = *touches.get(&mtn.seat_slot()).unwrap();
-                            let hit = layers[active_layer]
-                                .hit(width, height, x, y, Some(btn))
-                                .is_some();
-                            layers[layer].buttons[btn].1.set_active(&mut uinput, hit);
+                            let active = store.resolve(&rstate);
+                            let hit = match store.get(&active) {
+                                Layer::Buttons(fl) => {
+                                    fl.hit(width, height, x, y, Some(btn)).is_some()
+                                }
+                            };
+                            match store.get_mut(&layer) {
+                                Layer::Buttons(fl) => {
+                                    fl.buttons[btn].1.set_active(&mut uinput, hit)
+                                }
+                            }
                         }
                         TouchEvent::Up(up) => {
-                            if let Some((layer, btn)) = touches.remove(&up.seat_slot()) {
-                                layers[layer].buttons[btn].1.set_active(&mut uinput, false);
+                            if let Some(TouchTarget::Button { layer, btn }) =
+                                touches.remove(&up.seat_slot())
+                            {
+                                match store.get_mut(&layer) {
+                                    Layer::Buttons(fl) => {
+                                        fl.buttons[btn].1.set_active(&mut uinput, false)
+                                    }
+                                }
                             }
                         }
                         TouchEvent::Cancel(cancel) => {
@@ -1066,8 +1109,14 @@ fn real_main(drm: &mut DrmBackend) {
                             // (palm rejection, gesture reinterpretation, hardware quirks).
                             // Without handling it, the button stays visually active AND its
                             // key stays logically held down. Treat it exactly like Up.
-                            if let Some((layer, btn)) = touches.remove(&cancel.seat_slot()) {
-                                layers[layer].buttons[btn].1.set_active(&mut uinput, false);
+                            if let Some(TouchTarget::Button { layer, btn }) =
+                                touches.remove(&cancel.seat_slot())
+                            {
+                                match store.get_mut(&layer) {
+                                    Layer::Buttons(fl) => {
+                                        fl.buttons[btn].1.set_active(&mut uinput, false)
+                                    }
+                                }
                             }
                         }
                         _ => {}

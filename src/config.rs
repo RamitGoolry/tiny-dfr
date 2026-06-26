@@ -1,4 +1,5 @@
 use crate::fonts::{FontConfig, Pattern};
+use crate::layer::{Layer, LayerStore};
 use crate::FunctionLayer;
 use anyhow::Error;
 use cairo::FontFace;
@@ -12,7 +13,7 @@ use serde::{
     de::{self, Visitor},
     Deserialize, Deserializer,
 };
-use std::{fmt, fs::read_to_string, os::fd::AsFd};
+use std::{collections::HashMap, fmt, fs::read_to_string, os::fd::AsFd};
 
 const USER_CFG_PATH: &str = "/etc/tiny-dfr/config.toml";
 
@@ -98,7 +99,7 @@ fn load_font(name: &str) -> FontFace {
     FontFace::create_from_ft(&face).unwrap()
 }
 
-fn load_config(width: u16) -> (Config, [FunctionLayer; 2]) {
+fn load_config(width: u16) -> (Config, LayerStore) {
     let mut base =
         toml::from_str::<ConfigProxy>(&read_to_string("/usr/share/tiny-dfr/config.toml").unwrap())
             .unwrap();
@@ -141,10 +142,14 @@ fn load_config(width: u16) -> (Config, [FunctionLayer; 2]) {
     }
     let media_layer = FunctionLayer::with_config(media_layer_keys);
     let fkey_layer = FunctionLayer::with_config(primary_layer_keys);
-    let layers = if base.media_layer_default.unwrap() {
-        [media_layer, fkey_layer]
+    let mut registry = HashMap::new();
+    registry.insert("media".to_string(), Layer::Buttons(media_layer));
+    registry.insert("fkeys".to_string(), Layer::Buttons(fkey_layer));
+    // base_order[0] = shown when Fn is not held; base_order[1] = shown while Fn held.
+    let base_order = if base.media_layer_default.unwrap() {
+        ["media".to_string(), "fkeys".to_string()]
     } else {
-        [fkey_layer, media_layer]
+        ["fkeys".to_string(), "media".to_string()]
     };
     let cfg = Config {
         show_button_outlines: base.show_button_outlines.unwrap(),
@@ -154,7 +159,13 @@ fn load_config(width: u16) -> (Config, [FunctionLayer; 2]) {
         active_brightness: base.active_brightness.unwrap(),
         double_press_switch_layers: base.double_press_switch_layers.unwrap(),
     };
-    (cfg, layers)
+    (
+        cfg,
+        LayerStore {
+            registry,
+            base_order,
+        },
+    )
 }
 
 pub struct ConfigManager {
@@ -180,29 +191,24 @@ impl ConfigManager {
             watch_desc,
         }
     }
-    pub fn load_config(&self, width: u16) -> (Config, [FunctionLayer; 2]) {
+    pub fn load_config(&self, width: u16) -> (Config, LayerStore) {
         load_config(width)
     }
-    pub fn update_config(
-        &mut self,
-        cfg: &mut Config,
-        layers: &mut [FunctionLayer; 2],
-        width: u16,
-    ) -> bool {
+    pub fn update_config(&mut self, cfg: &mut Config, store: &mut LayerStore, width: u16) -> bool {
         if self.watch_desc.is_none() {
             self.watch_desc = arm_inotify(&self.inotify_fd);
             return false;
         }
         match self.inotify_fd.read_events() {
             Err(Errno::EAGAIN) => false,
-            r => self.handle_events(cfg, layers, width, r),
+            r => self.handle_events(cfg, store, width, r),
         }
     }
     #[cold]
     fn handle_events(
         &mut self,
         cfg: &mut Config,
-        layers: &mut [FunctionLayer; 2],
+        store: &mut LayerStore,
         width: u16,
         evts: Result<Vec<InotifyEvent>, Errno>,
     ) -> bool {
@@ -213,7 +219,7 @@ impl ConfigManager {
             }
             let parts = load_config(width);
             *cfg = parts.0;
-            *layers = parts.1;
+            *store = parts.1;
             ret = true;
             self.watch_desc = arm_inotify(&self.inotify_fd);
         }
