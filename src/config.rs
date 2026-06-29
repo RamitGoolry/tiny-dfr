@@ -1,6 +1,7 @@
 use crate::fonts::{FontConfig, Pattern};
 use crate::layer::LayerStore;
 use crate::function_layer::FunctionLayer;
+use crate::widgets::{BrightnessSlider, KbdIllumSlider, VolumeSlider};
 use anyhow::Error;
 use cairo::FontFace;
 use freetype::Library as FtLibrary;
@@ -150,7 +151,18 @@ fn load_config(width: u16) -> (Config, LayerStore) {
     registry.insert("media".to_string(), media_layer);
     registry.insert("fkeys".to_string(), fkey_layer);
     // Built-in modal slider layers, entered via a button's `OpenLayer = "..."`.
-    registry.insert("brightness".to_string(), FunctionLayer::brightness_slider());
+    registry.insert(
+        "brightness".to_string(),
+        FunctionLayer::slider_layer(Box::new(BrightnessSlider)),
+    );
+    registry.insert(
+        "kbd_illum".to_string(),
+        FunctionLayer::slider_layer(Box::new(KbdIllumSlider)),
+    );
+    registry.insert(
+        "volume".to_string(),
+        FunctionLayer::slider_layer(Box::new(VolumeSlider)),
+    );
     // base_order[0] = shown when Fn is not held; base_order[1] = shown while Fn held.
     let base_order = if base.media_layer_default.unwrap() {
         ["media".to_string(), "fkeys".to_string()]

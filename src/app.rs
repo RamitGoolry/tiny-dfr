@@ -23,6 +23,8 @@ use std::{
 
 use crate::action::{Action, Edge};
 use crate::backlight::BacklightManager;
+use crate::kbd_backlight::KbdBacklight;
+use crate::volume::VolumeMixer;
 use crate::config::{Config, ConfigManager};
 use crate::display::DrmBackend;
 use crate::input::toggle_keys;
@@ -40,6 +42,10 @@ pub(crate) struct App {
     rstate: ResolverState,
     touches: HashMap<i32, TouchTarget>,
     backlight: BacklightManager,
+    /// Keyboard backlight LED, driven by the keyboard-illumination slider.
+    kbd: KbdBacklight,
+    /// ALSA Master mixer, driven by the volume slider.
+    volume: VolumeMixer,
     uinput: UInputHandle<File>,
     cfg: Config,
     pixel_shift: PixelShiftManager,
@@ -65,10 +71,14 @@ impl App {
         db_height: u32,
         uinput: UInputHandle<File>,
         backlight: BacklightManager,
+        kbd: KbdBacklight,
     ) -> App {
         let (cfg, store) = cfg_mgr.load_config(width);
         let pixel_shift = PixelShiftManager::new();
         let last = Instant::now();
+        // The mixer opens /dev/snd/controlC0, reachable now that the daemon has
+        // dropped into the `audio` group (see real_main's PrivDrop group list).
+        let volume = VolumeMixer::new();
 
         // uinput virtual-device setup — must stay AFTER the privilege drop.
         uinput.set_evbit(EventKind::Key).unwrap();
@@ -111,6 +121,8 @@ impl App {
             rstate,
             touches,
             backlight,
+            kbd,
+            volume,
             uinput,
             cfg,
             pixel_shift,
@@ -126,6 +138,8 @@ impl App {
     pub(crate) fn state(&self) -> State {
         State {
             brightness: self.backlight.display_level(),
+            kbd_illum: self.kbd.level(),
+            volume: self.volume.level(),
         }
     }
 
@@ -340,6 +354,12 @@ impl App {
             }
             Action::SetBrightness(level) => {
                 self.backlight.set_display_level(level);
+            }
+            Action::SetKbdIllum(level) => {
+                self.kbd.set_level(level);
+            }
+            Action::SetVolume(level) => {
+                self.volume.set_level(level);
             }
             Action::OpenModal(target) => {
                 self.rstate.modal = Some(target.clone());

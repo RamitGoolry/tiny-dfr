@@ -8,7 +8,7 @@ pub(crate) mod indicator;
 pub(crate) mod slider;
 
 pub(crate) use button::Button;
-pub(crate) use slider::{BrightnessSlider, Slider};
+pub(crate) use slider::{BrightnessSlider, KbdIllumSlider, Slider, VolumeSlider};
 
 use cairo::Context;
 use drm::control::ClipRect;

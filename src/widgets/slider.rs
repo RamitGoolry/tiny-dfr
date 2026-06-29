@@ -18,6 +18,32 @@ impl SliderBackend for BrightnessSlider {
     }
 }
 
+/// Keyboard-illumination slider effect: pushes the level to the keyboard
+/// backlight LED and reads its current value back from `State` on grab.
+pub(crate) struct KbdIllumSlider;
+
+impl SliderBackend for KbdIllumSlider {
+    fn apply(&self, level: f64) -> Action {
+        Action::SetKbdIllum(level)
+    }
+    fn initial_level(&self, s: &State) -> f64 {
+        s.kbd_illum
+    }
+}
+
+/// Volume slider effect: pushes the level to the ALSA Master mixer and reads its
+/// current value back from `State` on grab.
+pub(crate) struct VolumeSlider;
+
+impl SliderBackend for VolumeSlider {
+    fn apply(&self, level: f64) -> Action {
+        Action::SetVolume(level)
+    }
+    fn initial_level(&self, s: &State) -> f64 {
+        s.volume
+    }
+}
+
 /// A full-bar slider widget: tap-and-hold a trigger button to expand into it,
 /// drag to set, release to collapse. Holds the shared drag UI only — the touch
 /// dispatch anchors the grab, feeds drag deltas in, and pushes the level to the

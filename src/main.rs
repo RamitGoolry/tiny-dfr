@@ -26,15 +26,18 @@ mod display;
 mod fonts;
 mod function_layer;
 mod input;
+mod kbd_backlight;
 mod layer;
 mod pixel_shift;
 mod state;
 mod touch;
+mod volume;
 mod widgets;
 
 use crate::app::App;
 use crate::config::ConfigManager;
 use crate::input::Interface;
+use crate::kbd_backlight::KbdBacklight;
 use backlight::BacklightManager;
 use display::DrmBackend;
 use touch::TouchReader;
@@ -92,12 +95,15 @@ fn real_main(drm: &mut DrmBackend) {
     // `nobody`. (drm is already open; uinput + the raw digitizer open here.)
     let uinput = UInputHandle::new(OpenOptions::new().write(true).open("/dev/uinput").unwrap());
     let backlight = BacklightManager::new();
+    // Keyboard backlight LED write fd, opened as root so it survives as `nobody`.
+    let kbd = KbdBacklight::new();
     // The T1 digitizer is read raw (see touch.rs) — libinput mangles its drags.
     let mut touch_reader = TouchReader::open(width, height);
     let mut cfg_mgr = ConfigManager::new();
 
-    // drop privileges to input and video group
-    let groups = ["input", "video"];
+    // drop privileges to input, video, and audio groups (audio for the ALSA
+    // mixer the volume slider drives — see volume.rs).
+    let groups = ["input", "video", "audio"];
 
     PrivDrop::default()
         .user("nobody")
@@ -107,7 +113,7 @@ fn real_main(drm: &mut DrmBackend) {
 
     // App owns the bar state + dispatch; its constructor runs the uinput device
     // setup, which must stay AFTER the privilege drop above.
-    let mut app = App::new(&cfg_mgr, width, db_width, db_height, uinput, backlight);
+    let mut app = App::new(&cfg_mgr, width, db_width, db_height, uinput, backlight, kbd);
 
     let mut input_main = Libinput::new_with_udev(Interface);
     input_main.udev_assign_seat("seat0").unwrap();

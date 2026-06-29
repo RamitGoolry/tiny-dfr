@@ -5,7 +5,7 @@ use crate::action::Action;
 use crate::config::{ButtonConfig, Config};
 use crate::pixel_shift::PIXEL_SHIFT_WIDTH_PX;
 use crate::state::State;
-use crate::widgets::{BrightnessSlider, Cell, Region, Slider, Widget};
+use crate::widgets::{Cell, Region, Slider, SliderBackend, Widget};
 use crate::{dbg_ts, BUTTON_SPACING_PX};
 
 #[derive(Default)]
@@ -47,13 +47,14 @@ impl FunctionLayer {
             faster_refresh,
         }
     }
-    /// A full-bar modal slider layer: one stretched `Slider` cell.
-    pub(crate) fn brightness_slider() -> FunctionLayer {
+    /// A full-bar modal slider layer: one stretched `Slider` cell wrapping the
+    /// given backend (brightness, keyboard illumination, volume, …).
+    pub(crate) fn slider_layer(backend: Box<dyn SliderBackend>) -> FunctionLayer {
         FunctionLayer {
             displays_time: false,
             cells: vec![Cell {
                 stretch: 1,
-                widget: Widget::Slider(Slider::new(Box::new(BrightnessSlider))),
+                widget: Widget::Slider(Slider::new(backend)),
             }],
             virtual_button_count: 1,
             faster_refresh: false,

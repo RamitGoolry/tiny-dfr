@@ -6,4 +6,8 @@
 pub(crate) struct State {
     /// Current display backlight level, 0.0..=1.0.
     pub(crate) brightness: f64,
+    /// Current keyboard backlight level, 0.0..=1.0.
+    pub(crate) kbd_illum: f64,
+    /// Current ALSA Master volume, 0.0..=1.0.
+    pub(crate) volume: f64,
 }
