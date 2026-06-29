@@ -11,12 +11,16 @@
 #include <linux/bug.h>
 #include <linux/container_of.h>
 #include <linux/err.h>
+#include <linux/limits.h>
+#include <linux/minmax.h>
 #include <linux/module.h>
+#include <linux/mutex.h>
 #include <linux/overflow.h>
 #include <linux/slab.h>
 #include <linux/types.h>
 #include <linux/unaligned.h>
 #include <linux/usb.h>
+#include <linux/workqueue.h>
 
 #include <drm/drm_atomic.h>
 #include <drm/drm_atomic_helper.h>
@@ -43,6 +47,20 @@
 #define APPLETBDRM_MSG_SIGNAL_READINESS	cpu_to_le32(0x52454459) /* REDY */
 
 #define APPLETBDRM_BULK_MSG_TIMEOUT	1000
+/*
+ * The per-frame UPDATE_COMPLETE ack normally arrives at ~1s; give the off-path
+ * worker read a wide margin so a near-miss doesn't time out and desync the pipe.
+ */
+#define APPLETBDRM_ACK_TIMEOUT		3000
+/*
+ * Cap the device update rate (~30fps). Firing frames back-to-back overruns the
+ * device's request/response pipe; the stock driver was paced by the render loop.
+ */
+#define APPLETBDRM_FLUSH_INTERVAL_MS	33
+/* Drain the device's stale ack backlog so the response pipe never chokes. */
+#define APPLETBDRM_DRIFT_DRAIN_MS	200	/* drain when this far behind on acks */
+#define APPLETBDRM_DRAIN_TIMEOUT	50	/* ms; short — only mops already-queued acks */
+#define APPLETBDRM_DRAIN_MAX		8192	/* safety cap on one drain pass */
 
 #define drm_to_adev(_drm)		container_of(_drm, struct appletbdrm_device, drm)
 #define adev_to_udev(adev)		interface_to_usbdev(to_usb_interface((adev)->drm.dev))
@@ -135,20 +153,32 @@ struct appletbdrm_device {
 	struct drm_plane primary_plane;
 	struct drm_crtc crtc;
 	struct drm_encoder encoder;
+
+	/*
+	 * The per-frame UPDATE_COMPLETE ack (read in appletbdrm_read_response)
+	 * can block for up to APPLETBDRM_BULK_MSG_TIMEOUT ms, which must not sit
+	 * on the atomic commit / DIRTYFB critical path. The atomic update copies
+	 * the damaged pixels into shadow_buf (a full frame in BGR888), unions the
+	 * dirty rect into damage, and hands the slow USB send+ack to flush_work.
+	 */
+	struct delayed_work flush_work;
+	struct mutex damage_lock; /* protects damage */
+	struct drm_rect damage; /* accumulated dirty rect awaiting a send */
+	void *shadow_buf; /* full frame in BGR888, lazily allocated */
+	size_t shadow_pitch;
+	struct appletbdrm_fb_request_response *response; /* worker-owned ack */
+	u64 flush_seq; /* per-frame counter for the flush instrumentation log */
 };
 
-struct appletbdrm_plane_state {
-	struct drm_shadow_plane_state base;
-	struct appletbdrm_fb_request *request;
-	struct appletbdrm_fb_request_response *response;
-	size_t request_size;
-	size_t frames_size;
-};
-
-static inline struct appletbdrm_plane_state *to_appletbdrm_plane_state(struct drm_plane_state *state)
-{
-	return container_of(state, struct appletbdrm_plane_state, base.base);
-}
+/*
+ * Runtime toggle for per-frame flush instrumentation. Off by default; enable with
+ *   echo 1 | sudo tee /sys/module/appletbdrm/parameters/flush_log
+ * Logs each queue + flush with timing and the ack offset (drift), then disable to
+ * stop the dmesg flood. Reusable for any future display-pipeline debugging.
+ */
+static bool flush_log;
+module_param(flush_log, bool, 0644);
+MODULE_PARM_DESC(flush_log, "Log every frame queue + flush with timing and ack offset");
 
 static int appletbdrm_send_request(struct appletbdrm_device *adev,
 				   struct appletbdrm_msg_request_header *request, size_t size)
@@ -175,7 +205,8 @@ static int appletbdrm_send_request(struct appletbdrm_device *adev,
 
 static int appletbdrm_read_response(struct appletbdrm_device *adev,
 				    struct appletbdrm_msg_response_header *response,
-				    size_t size, __le32 expected_response)
+				    size_t size, __le32 expected_response,
+				    unsigned int timeout)
 {
 	struct usb_device *udev = adev_to_udev(adev);
 	struct drm_device *drm = &adev->drm;
@@ -184,7 +215,7 @@ static int appletbdrm_read_response(struct appletbdrm_device *adev,
 
 retry:
 	ret = usb_bulk_msg(udev, usb_rcvbulkpipe(udev, adev->in_ep),
-			   response, size, &actual_size, APPLETBDRM_BULK_MSG_TIMEOUT);
+			   response, size, &actual_size, timeout);
 	if (ret) {
 		drm_err(drm, "Failed to read response (%d)\n", ret);
 		return ret;
@@ -218,6 +249,29 @@ retry:
 	}
 
 	return 0;
+}
+
+/*
+ * Drain (and discard) any responses the device has already queued, until the IN
+ * endpoint runs dry. Clears a stale-ack backlog so the worker never falls
+ * permanently behind — a deep backlog is what eventually chokes the device's pipe
+ * (garbage short acks, then -110 send timeouts). Returns the count drained.
+ */
+static int appletbdrm_drain_responses(struct appletbdrm_device *adev)
+{
+	struct usb_device *udev = adev_to_udev(adev);
+	int ret, drained = 0;
+
+	while (drained < APPLETBDRM_DRAIN_MAX) {
+		ret = usb_bulk_msg(udev, usb_rcvbulkpipe(udev, adev->in_ep),
+				   adev->response, sizeof(*adev->response),
+				   NULL, APPLETBDRM_DRAIN_TIMEOUT);
+		if (ret)
+			break;	/* -ETIMEDOUT (empty) or any error: stop */
+		drained++;
+	}
+
+	return drained;
 }
 
 static int appletbdrm_send_msg(struct appletbdrm_device *adev, __le32 msg)
@@ -269,7 +323,7 @@ static int appletbdrm_get_information(struct appletbdrm_device *adev)
 		return ret;
 
 	ret = appletbdrm_read_response(adev, &info->header, sizeof(*info),
-				       APPLETBDRM_MSG_GET_INFORMATION);
+				       APPLETBDRM_MSG_GET_INFORMATION, APPLETBDRM_BULK_MSG_TIMEOUT);
 	if (ret)
 		goto free_info;
 
@@ -303,6 +357,24 @@ static u32 rect_size(struct drm_rect *rect)
 		(BITS_TO_BYTES(APPLETBDRM_BITS_PER_PIXEL));
 }
 
+static void appletbdrm_damage_init(struct drm_rect *r)
+{
+	*r = (struct drm_rect){ .x1 = INT_MAX, .y1 = INT_MAX, .x2 = INT_MIN, .y2 = INT_MIN };
+}
+
+static bool appletbdrm_damage_empty(const struct drm_rect *r)
+{
+	return r->x1 >= r->x2 || r->y1 >= r->y2;
+}
+
+static void appletbdrm_damage_add(struct drm_rect *r, const struct drm_rect *d)
+{
+	r->x1 = min(r->x1, d->x1);
+	r->y1 = min(r->y1, d->y1);
+	r->x2 = max(r->x2, d->x2);
+	r->y2 = max(r->y2, d->y2);
+}
+
 static int appletbdrm_connector_helper_get_modes(struct drm_connector *connector)
 {
 	struct appletbdrm_device *adev = drm_to_adev(connector->dev);
@@ -319,14 +391,8 @@ static int appletbdrm_primary_plane_helper_atomic_check(struct drm_plane *plane,
 						   struct drm_atomic_state *state)
 {
 	struct drm_plane_state *new_plane_state = drm_atomic_get_new_plane_state(state, plane);
-	struct drm_plane_state *old_plane_state = drm_atomic_get_old_plane_state(state, plane);
 	struct drm_crtc *new_crtc = new_plane_state->crtc;
 	struct drm_crtc_state *new_crtc_state = NULL;
-	struct appletbdrm_plane_state *appletbdrm_state = to_appletbdrm_plane_state(new_plane_state);
-	struct drm_atomic_helper_damage_iter iter;
-	struct drm_rect damage;
-	size_t frames_size = 0;
-	size_t request_size;
 	int ret;
 
 	if (new_crtc)
@@ -338,64 +404,139 @@ static int appletbdrm_primary_plane_helper_atomic_check(struct drm_plane *plane,
 						  false, false);
 	if (ret)
 		return ret;
-	else if (!new_plane_state->visible)
-		return 0;
-
-	drm_atomic_helper_damage_iter_init(&iter, old_plane_state, new_plane_state);
-	drm_atomic_for_each_plane_damage(&iter, &damage) {
-		frames_size += struct_size((struct appletbdrm_frame *)0, buf, rect_size(&damage));
-	}
-
-	if (!frames_size)
-		return 0;
-
-	request_size = ALIGN(sizeof(struct appletbdrm_fb_request) +
-		       frames_size +
-		       sizeof(struct appletbdrm_fb_request_footer), 16);
-
-	appletbdrm_state->request = kzalloc(request_size, GFP_KERNEL);
-
-	if (!appletbdrm_state->request)
-		return -ENOMEM;
-
-	appletbdrm_state->response = kzalloc_obj(*appletbdrm_state->response);
-
-	if (!appletbdrm_state->response)
-		return -ENOMEM;
-
-	appletbdrm_state->request_size = request_size;
-	appletbdrm_state->frames_size = frames_size;
 
 	return 0;
 }
 
+/*
+ * Synchronous part of a flush: copy the damaged pixels into the driver-owned
+ * shadow buffer (in BGR888, full-frame), accumulate the dirty rect and kick the
+ * worker. No USB I/O happens here, so the atomic commit / DIRTYFB ioctl returns
+ * as soon as the pixels are copied instead of blocking on the per-frame ack.
+ */
 static int appletbdrm_flush_damage(struct appletbdrm_device *adev,
 				   struct drm_plane_state *old_state,
 				   struct drm_plane_state *state)
 {
-	struct appletbdrm_plane_state *appletbdrm_state = to_appletbdrm_plane_state(state);
 	struct drm_shadow_plane_state *shadow_plane_state = to_drm_shadow_plane_state(state);
-	struct appletbdrm_fb_request_response *response = appletbdrm_state->response;
-	struct appletbdrm_fb_request_footer *footer;
 	struct drm_atomic_helper_damage_iter iter;
 	struct drm_framebuffer *fb = state->fb;
-	struct appletbdrm_fb_request *request = appletbdrm_state->request;
 	struct drm_device *drm = &adev->drm;
-	struct appletbdrm_frame *frame;
-	u64 timestamp = ktime_get_ns();
+	struct drm_rect frame_damage;
+	unsigned int dst_pitch;
 	struct drm_rect damage;
-	size_t frames_size = appletbdrm_state->frames_size;
-	size_t request_size = appletbdrm_state->request_size;
+	bool dirty = false;
 	int ret;
-
-	if (!frames_size)
-		return 0;
 
 	ret = drm_gem_fb_begin_cpu_access(fb, DMA_FROM_DEVICE);
 	if (ret) {
 		drm_err(drm, "Failed to start CPU framebuffer access (%d)\n", ret);
-		goto end_fb_cpu_access;
+		return ret;
 	}
+
+	if (!adev->shadow_buf) {
+		adev->shadow_pitch = fb->width * BITS_TO_BYTES(APPLETBDRM_BITS_PER_PIXEL);
+		adev->shadow_buf = kvzalloc(adev->shadow_pitch * fb->height, GFP_KERNEL);
+		if (!adev->shadow_buf) {
+			ret = -ENOMEM;
+			goto end_fb_cpu_access;
+		}
+	}
+
+	dst_pitch = adev->shadow_pitch;
+	appletbdrm_damage_init(&frame_damage);
+
+	drm_atomic_helper_damage_iter_init(&iter, old_state, state);
+	drm_atomic_for_each_plane_damage(&iter, &damage) {
+		struct drm_rect dst_clip = state->dst;
+		struct iosys_map dst = IOSYS_MAP_INIT_VADDR((u8 *)adev->shadow_buf +
+			damage.y1 * adev->shadow_pitch +
+			damage.x1 * BITS_TO_BYTES(APPLETBDRM_BITS_PER_PIXEL));
+
+		if (!drm_rect_intersect(&dst_clip, &damage))
+			continue;
+
+		switch (fb->format->format) {
+		case DRM_FORMAT_XRGB8888:
+			drm_fb_xrgb8888_to_bgr888(&dst, &dst_pitch, &shadow_plane_state->data[0], fb, &damage, &shadow_plane_state->fmtcnv_state);
+			break;
+		default:
+			drm_fb_memcpy(&dst, &dst_pitch, &shadow_plane_state->data[0], fb, &damage);
+			break;
+		}
+
+		appletbdrm_damage_add(&frame_damage, &damage);
+		dirty = true;
+	}
+
+end_fb_cpu_access:
+	drm_gem_fb_end_cpu_access(fb, DMA_FROM_DEVICE);
+
+	if (ret || !dirty)
+		return ret;
+
+	mutex_lock(&adev->damage_lock);
+	appletbdrm_damage_add(&adev->damage, &frame_damage);
+	mutex_unlock(&adev->damage_lock);
+
+	queue_delayed_work(system_long_wq, &adev->flush_work,
+			   msecs_to_jiffies(APPLETBDRM_FLUSH_INTERVAL_MS));
+
+	return 0;
+}
+
+/*
+ * Slow part of a flush, off the commit critical path: build one coalesced frame
+ * from the shadow buffer and run the full USB send + UPDATE_COMPLETE ack. Handles
+ * ONE frame per run and re-queues itself with a delay, so the device is never
+ * driven faster than ~30fps — firing frames back-to-back overruns its
+ * request/response pipe (the stock driver was paced by the render loop).
+ */
+static void appletbdrm_flush_work(struct work_struct *work)
+{
+	struct appletbdrm_device *adev = container_of(to_delayed_work(work),
+						      struct appletbdrm_device, flush_work);
+	struct appletbdrm_fb_request_response *response = adev->response;
+	struct appletbdrm_fb_request_footer *footer;
+	struct appletbdrm_fb_request *request;
+	struct drm_device *drm = &adev->drm;
+	struct appletbdrm_frame *frame;
+	u64 timestamp = ktime_get_ns();
+	u64 t_send, t_done, wall;
+	unsigned int width, height, y;
+	size_t frames_size, request_size;
+	const u8 *src;
+	u8 *dst;
+	struct drm_rect r;
+	u32 buf_size;
+	s64 off_ms = -1;
+	int send_ret = 0, read_ret = -1, drained = 0;
+	bool more;
+	int idx;
+
+	if (!drm_dev_enter(drm, &idx))
+		return;
+
+	mutex_lock(&adev->damage_lock);
+	r = adev->damage;
+	appletbdrm_damage_init(&adev->damage);
+	mutex_unlock(&adev->damage_lock);
+
+	if (appletbdrm_damage_empty(&r))
+		goto out;
+
+	width = drm_rect_width(&r);
+	height = drm_rect_height(&r);
+	buf_size = rect_size(&r);
+
+	frames_size = struct_size((struct appletbdrm_frame *)0, buf, buf_size);
+	request_size = ALIGN(sizeof(struct appletbdrm_fb_request) +
+			     frames_size +
+			     sizeof(struct appletbdrm_fb_request_footer), 16);
+
+	request = kzalloc(request_size, GFP_KERNEL);
+	if (!request)
+		goto out;
 
 	request->header.unk_00 = cpu_to_le16(2);
 	request->header.unk_02 = cpu_to_le16(0x12);
@@ -406,65 +547,92 @@ static int appletbdrm_flush_damage(struct appletbdrm_device *adev,
 
 	frame = (struct appletbdrm_frame *)request->data;
 
-	drm_atomic_helper_damage_iter_init(&iter, old_state, state);
-	drm_atomic_for_each_plane_damage(&iter, &damage) {
-		struct drm_rect dst_clip = state->dst;
-		struct iosys_map dst = IOSYS_MAP_INIT_VADDR(frame->buf);
-		u32 buf_size = rect_size(&damage);
+	/*
+	 * The coordinates need to be translated to the coordinate
+	 * system the device expects, see the comment in
+	 * appletbdrm_setup_mode_config
+	 */
+	frame->begin_x = cpu_to_le16(r.y1);
+	frame->begin_y = cpu_to_le16(adev->height - r.x2);
+	frame->width = cpu_to_le16(height);
+	frame->height = cpu_to_le16(width);
+	frame->buf_size = cpu_to_le32(buf_size);
 
-		if (!drm_rect_intersect(&dst_clip, &damage))
-			continue;
-
-		/*
-		 * The coordinates need to be translated to the coordinate
-		 * system the device expects, see the comment in
-		 * appletbdrm_setup_mode_config
-		 */
-		frame->begin_x = cpu_to_le16(damage.y1);
-		frame->begin_y = cpu_to_le16(adev->height - damage.x2);
-		frame->width = cpu_to_le16(drm_rect_height(&damage));
-		frame->height = cpu_to_le16(drm_rect_width(&damage));
-		frame->buf_size = cpu_to_le32(buf_size);
-
-		switch (fb->format->format) {
-		case DRM_FORMAT_XRGB8888:
-			drm_fb_xrgb8888_to_bgr888(&dst, NULL, &shadow_plane_state->data[0], fb, &damage, &shadow_plane_state->fmtcnv_state);
-			break;
-		default:
-			drm_fb_memcpy(&dst, NULL, &shadow_plane_state->data[0], fb, &damage);
-			break;
-		}
-
-		frame = (void *)frame + struct_size(frame, buf, buf_size);
+	/*
+	 * The shadow buffer already holds BGR888 pixels; extract the coalesced
+	 * rect row by row into the tightly-packed frame buffer. Read without the
+	 * lock (like gud) — a rare overlapping write only causes a transient tear
+	 * the next coalesced send corrects.
+	 */
+	dst = frame->buf;
+	src = (const u8 *)adev->shadow_buf + r.y1 * adev->shadow_pitch +
+		r.x1 * BITS_TO_BYTES(APPLETBDRM_BITS_PER_PIXEL);
+	for (y = 0; y < height; y++) {
+		memcpy(dst, src, width * BITS_TO_BYTES(APPLETBDRM_BITS_PER_PIXEL));
+		dst += width * BITS_TO_BYTES(APPLETBDRM_BITS_PER_PIXEL);
+		src += adev->shadow_pitch;
 	}
 
 	footer = (struct appletbdrm_fb_request_footer *)&request->data[frames_size];
-
 	footer->unk_0c = cpu_to_le32(0xfffe);
 	footer->unk_1c = cpu_to_le32(0x80001);
 	footer->unk_34 = cpu_to_le32(0x80002);
 	footer->unk_4c = cpu_to_le32(0xffff);
 	footer->timestamp = cpu_to_le64(timestamp);
 
-	ret = appletbdrm_send_request(adev, &request->header, request_size);
-	if (ret)
-		goto end_fb_cpu_access;
-
-	ret = appletbdrm_read_response(adev, &response->header, sizeof(*response),
-				       APPLETBDRM_MSG_UPDATE_COMPLETE);
-	if (ret)
-		goto end_fb_cpu_access;
-
-	if (response->timestamp != footer->timestamp) {
-		drm_err(drm, "Response timestamp (%llu) doesn't match request timestamp (%llu)\n",
-			le64_to_cpu(response->timestamp), timestamp);
-		goto end_fb_cpu_access;
+	t_send = ktime_get_ns();
+	send_ret = appletbdrm_send_request(adev, &request->header, request_size);
+	if (!send_ret) {
+		read_ret = appletbdrm_read_response(adev, &response->header, sizeof(*response),
+						    APPLETBDRM_MSG_UPDATE_COMPLETE, APPLETBDRM_ACK_TIMEOUT);
+		if (!read_ret)
+			off_ms = ((s64)timestamp -
+				  (s64)le64_to_cpu(response->timestamp)) / (s64)NSEC_PER_MSEC;
 	}
 
-end_fb_cpu_access:
-	drm_gem_fb_end_cpu_access(fb, DMA_FROM_DEVICE);
+	/*
+	 * Keep the response pipe from backing up: if this frame's ack was stale (we
+	 * fell behind) or the read errored, drain the stale tail of acks the device
+	 * already queued so the next frame starts current. THIS frame's own ack was
+	 * already waited for in full above; this only mops up the already-arrived
+	 * backlog — unlike Patch A, which shortened that wait and desynced the device.
+	 */
+	if (read_ret || off_ms > APPLETBDRM_DRIFT_DRAIN_MS)
+		drained = appletbdrm_drain_responses(adev);
 
-	return ret;
+	t_done = ktime_get_ns();
+	wall = ktime_get_real_ns();
+
+	/*
+	 * One line per frame the worker actually pushes. off_ms is the drift (how
+	 * far behind the ack we got is); dt_ms is how long the send+ack took;
+	 * drained is how many stale acks we mopped up. The epoch t= lines up with
+	 * tiny-dfr's [dbg] timestamps for cross-correlation.
+	 */
+	if (flush_log)
+		drm_info(drm,
+			 "flush #%llu t=%llu.%09llu send=%d read=%d off=%lldms dt=%llums drained=%d rect=(%d,%d)-(%d,%d)\n",
+			 adev->flush_seq++, wall / NSEC_PER_SEC, wall % NSEC_PER_SEC,
+			 send_ret, read_ret, off_ms,
+			 (t_done - t_send) / NSEC_PER_MSEC, drained,
+			 r.x1, r.y1, r.x2, r.y2);
+
+	kfree(request);
+
+out:
+	/*
+	 * Re-queue (paced) if more damage arrived while we were busy. atomic_update
+	 * queues with the same delay, so device updates stay >= the interval apart
+	 * however they are triggered.
+	 */
+	mutex_lock(&adev->damage_lock);
+	more = !appletbdrm_damage_empty(&adev->damage);
+	mutex_unlock(&adev->damage_lock);
+	if (more)
+		queue_delayed_work(system_long_wq, &adev->flush_work,
+				   msecs_to_jiffies(APPLETBDRM_FLUSH_INTERVAL_MS));
+
+	drm_dev_exit(idx);
 }
 
 static void appletbdrm_primary_plane_helper_atomic_update(struct drm_plane *plane,
@@ -491,64 +659,27 @@ static void appletbdrm_primary_plane_helper_atomic_disable(struct drm_plane *pla
 	struct appletbdrm_device *adev = drm_to_adev(dev);
 	int idx;
 
+	/*
+	 * Drain the worker and free the shadow buffer unconditionally — on
+	 * disconnect the device is already unplugged (so the drm_dev_enter below
+	 * fails), but the work still needs cancelling and the buffer freeing.
+	 * cancel_delayed_work_sync waits for any in-flight send+ack to finish; do not
+	 * hold damage_lock across it.
+	 */
+	cancel_delayed_work_sync(&adev->flush_work);
+
+	mutex_lock(&adev->damage_lock);
+	kvfree(adev->shadow_buf);
+	adev->shadow_buf = NULL;
+	appletbdrm_damage_init(&adev->damage);
+	mutex_unlock(&adev->damage_lock);
+
 	if (!drm_dev_enter(dev, &idx))
 		return;
 
 	appletbdrm_clear_display(adev);
 
 	drm_dev_exit(idx);
-}
-
-static void appletbdrm_primary_plane_reset(struct drm_plane *plane)
-{
-	struct appletbdrm_plane_state *appletbdrm_state;
-
-	WARN_ON(plane->state);
-
-	appletbdrm_state = kzalloc_obj(*appletbdrm_state);
-	if (!appletbdrm_state)
-		return;
-
-	__drm_gem_reset_shadow_plane(plane, &appletbdrm_state->base);
-}
-
-static struct drm_plane_state *appletbdrm_primary_plane_duplicate_state(struct drm_plane *plane)
-{
-	struct drm_shadow_plane_state *new_shadow_plane_state;
-	struct appletbdrm_plane_state *appletbdrm_state;
-
-	if (WARN_ON(!plane->state))
-		return NULL;
-
-	appletbdrm_state = kzalloc_obj(*appletbdrm_state);
-	if (!appletbdrm_state)
-		return NULL;
-
-	/* Request and response are not duplicated and are allocated in .atomic_check */
-	appletbdrm_state->request = NULL;
-	appletbdrm_state->response = NULL;
-
-	appletbdrm_state->request_size = 0;
-	appletbdrm_state->frames_size = 0;
-
-	new_shadow_plane_state = &appletbdrm_state->base;
-
-	__drm_gem_duplicate_shadow_plane_state(plane, new_shadow_plane_state);
-
-	return &new_shadow_plane_state->base;
-}
-
-static void appletbdrm_primary_plane_destroy_state(struct drm_plane *plane,
-						   struct drm_plane_state *state)
-{
-	struct appletbdrm_plane_state *appletbdrm_state = to_appletbdrm_plane_state(state);
-
-	kfree(appletbdrm_state->request);
-	kfree(appletbdrm_state->response);
-
-	__drm_gem_destroy_shadow_plane_state(&appletbdrm_state->base);
-
-	kfree(appletbdrm_state);
 }
 
 static const struct drm_plane_helper_funcs appletbdrm_primary_plane_helper_funcs = {
@@ -561,9 +692,7 @@ static const struct drm_plane_helper_funcs appletbdrm_primary_plane_helper_funcs
 static const struct drm_plane_funcs appletbdrm_primary_plane_funcs = {
 	.update_plane = drm_atomic_helper_update_plane,
 	.disable_plane = drm_atomic_helper_disable_plane,
-	.reset = appletbdrm_primary_plane_reset,
-	.atomic_duplicate_state = appletbdrm_primary_plane_duplicate_state,
-	.atomic_destroy_state = appletbdrm_primary_plane_destroy_state,
+	DRM_GEM_SHADOW_PLANE_FUNCS,
 	.destroy = drm_plane_cleanup,
 };
 
@@ -750,6 +879,14 @@ static int appletbdrm_probe(struct usb_interface *intf,
 	adev->out_ep = bulk_out->bEndpointAddress;
 
 	drm = &adev->drm;
+
+	mutex_init(&adev->damage_lock);
+	INIT_DELAYED_WORK(&adev->flush_work, appletbdrm_flush_work);
+	appletbdrm_damage_init(&adev->damage);
+
+	adev->response = devm_kzalloc(dev, sizeof(*adev->response), GFP_KERNEL);
+	if (!adev->response)
+		return -ENOMEM;
 
 	usb_set_intfdata(intf, adev);
 
