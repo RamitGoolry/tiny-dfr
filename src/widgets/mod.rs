@@ -10,6 +10,7 @@ pub(crate) mod slider;
 pub(crate) use button::Button;
 pub(crate) use slider::{BrightnessSlider, KbdIllumSlider, Slider, VolumeSlider};
 
+use anyhow::Result;
 use cairo::Context;
 use drm::control::ClipRect;
 
@@ -122,24 +123,31 @@ impl Widget {
     /// interactive `Button`; `Time` a clock indicator; `Battery` a battery
     /// indicator (falling back to a "Battery N/A" button when no device exists);
     /// otherwise an empty `Spacer`.
-    pub(crate) fn from_config(cfg: ButtonConfig) -> Widget {
+    pub(crate) fn from_config(cfg: ButtonConfig) -> Result<Widget> {
         if cfg.text.is_some() || cfg.icon.is_some() {
-            Widget::Button(Button::from_config(cfg))
+            Ok(Widget::Button(Button::from_config(cfg)?))
         } else if let Some(time) = cfg.time {
-            Widget::Indicator(Box::new(ClockIndicator::new(&time, cfg.locale.as_deref())))
+            Ok(Widget::Indicator(Box::new(ClockIndicator::new(
+                &time,
+                cfg.locale.as_deref(),
+            )?)))
         } else if let Some(battery_mode) = cfg.battery {
             if let Some(battery) = find_battery_device() {
-                Widget::Indicator(Box::new(BatteryIndicator::new(battery, battery_mode, cfg.theme)))
+                Ok(Widget::Indicator(Box::new(BatteryIndicator::new(
+                    battery,
+                    battery_mode,
+                    cfg.theme,
+                )?)))
             } else {
                 let backend = KeyButton::new_text(
                     "Battery N/A".to_string(),
                     cfg.action,
                     cfg.open_layer.clone(),
                 );
-                Widget::Button(Button::new(Box::new(backend)))
+                Ok(Widget::Button(Button::new(Box::new(backend))))
             }
         } else {
-            Widget::Spacer
+            Ok(Widget::Spacer)
         }
     }
 

@@ -1,3 +1,4 @@
+use anyhow::{anyhow, Result};
 use cairo::{Context, Format, ImageSurface};
 use chrono::{
     format::{Item as ChronoItem, StrftimeItems},
@@ -20,7 +21,7 @@ pub(crate) struct ClockIndicator {
 }
 
 impl ClockIndicator {
-    pub(crate) fn new(format: &str, locale_str: Option<&str>) -> ClockIndicator {
+    pub(crate) fn new(format: &str, locale_str: Option<&str>) -> Result<ClockIndicator> {
         let format_str = if format == "24hr" {
             "%H:%M    %a %-e %b"
         } else if format == "12hr" {
@@ -29,18 +30,17 @@ impl ClockIndicator {
             format
         };
 
-        let format_items = match StrftimeItems::new(format_str).parse_to_owned() {
-            Ok(s) => s,
-            Err(e) => panic!("Invalid time format, consult the configuration file for examples of correct ones: {e:?}"),
-        };
+        let format_items = StrftimeItems::new(format_str).parse_to_owned().map_err(|e| {
+            anyhow!("invalid time format '{format}' (see the config file for valid examples): {e:?}")
+        })?;
 
         let locale = locale_str
             .and_then(|l| Locale::try_from(l).ok())
             .unwrap_or(Locale::POSIX);
-        ClockIndicator {
+        Ok(ClockIndicator {
             format: format_items,
             locale,
-        }
+        })
     }
 }
 
@@ -87,21 +87,19 @@ pub(crate) struct BatteryIndicator {
 }
 
 impl BatteryIndicator {
-    fn load_battery_image(icon: &str, theme: Option<impl AsRef<str>>) -> Handle {
-        if let crate::widgets::button::ButtonImage::Svg(svg) =
-            try_load_image(icon, theme, DEFAULT_ICON_SIZE, DEFAULT_ICON_SIZE).unwrap()
-        {
-            return svg;
+    fn load_battery_image(icon: &str, theme: Option<impl AsRef<str>>) -> Result<Handle> {
+        match try_load_image(icon, theme, DEFAULT_ICON_SIZE, DEFAULT_ICON_SIZE)? {
+            crate::widgets::button::ButtonImage::Svg(svg) => Ok(svg),
+            _ => Err(anyhow!("battery icon '{icon}' is not an SVG")),
         }
-        panic!("failed to load icon");
     }
 
     pub(crate) fn new(
         battery: String,
         battery_mode: String,
         theme: Option<impl AsRef<str>>,
-    ) -> BatteryIndicator {
-        let bolt = Self::load_battery_image("bolt", theme.as_ref());
+    ) -> Result<BatteryIndicator> {
+        let bolt = Self::load_battery_image("bolt", theme.as_ref())?;
         let mut plain = Vec::new();
         let mut charging = Vec::new();
         for icon in [
@@ -114,7 +112,7 @@ impl BatteryIndicator {
             "battery_6_bar",
             "battery_full",
         ] {
-            plain.push(Self::load_battery_image(icon, theme.as_ref()));
+            plain.push(Self::load_battery_image(icon, theme.as_ref())?);
         }
         for icon in [
             "battery_charging_20",
@@ -125,15 +123,19 @@ impl BatteryIndicator {
             "battery_charging_90",
             "battery_charging_full",
         ] {
-            charging.push(Self::load_battery_image(icon, theme.as_ref()));
+            charging.push(Self::load_battery_image(icon, theme.as_ref())?);
         }
         let battery_mode = match battery_mode.as_str() {
             "icon" => BatteryIconMode::Icon,
             "percentage" => BatteryIconMode::Percentage,
             "both" => BatteryIconMode::Both,
-            _ => panic!("invalid battery mode, accepted modes: icon, percentage, both"),
+            other => {
+                return Err(anyhow!(
+                    "invalid battery mode '{other}', accepted modes: icon, percentage, both"
+                ))
+            }
         };
-        BatteryIndicator {
+        Ok(BatteryIndicator {
             device: battery,
             mode: battery_mode,
             images: BatteryImages {
@@ -141,7 +143,7 @@ impl BatteryIndicator {
                 bolt,
                 charging,
             },
-        }
+        })
     }
 
     /// Set the cairo source to the charge-state colour — green charging, red low,

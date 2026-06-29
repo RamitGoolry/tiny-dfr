@@ -73,7 +73,11 @@ impl App {
         backlight: BacklightManager,
         kbd: KbdBacklight,
     ) -> App {
-        let (cfg, store) = cfg_mgr.load_config(width);
+        // Fatal at startup: an unloadable config means the daemon cannot run. This
+        // runs under `real_main`'s catch_unwind, so the panic paints the crash bar.
+        let (cfg, store) = cfg_mgr
+            .load_config(width)
+            .unwrap_or_else(|e| panic!("failed to load configuration: {e:#}"));
         let pixel_shift = PixelShiftManager::new();
         let last = Instant::now();
         // The mixer opens /dev/snd/controlC0, reachable now that the daemon has

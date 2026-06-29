@@ -1,8 +1,8 @@
 use crate::fonts::{FontConfig, Pattern};
-use crate::layer::LayerStore;
 use crate::function_layer::FunctionLayer;
+use crate::layer::LayerStore;
 use crate::widgets::{BrightnessSlider, KbdIllumSlider, VolumeSlider};
-use anyhow::Error;
+use anyhow::{anyhow, Context, Result};
 use cairo::FontFace;
 use freetype::Library as FtLibrary;
 use input_linux::Key;
@@ -14,7 +14,7 @@ use serde::{
     de::{self, Visitor},
     Deserialize, Deserializer,
 };
-use std::{collections::HashMap, fmt, fs::read_to_string, os::fd::AsFd};
+use std::{collections::HashMap, fmt, fs::read_to_string, io::ErrorKind, os::fd::AsFd};
 
 const USER_CFG_PATH: &str = "/etc/tiny-dfr/config.toml";
 
@@ -88,43 +88,59 @@ pub struct ButtonConfig {
     pub open_layer: Option<String>,
 }
 
-fn load_font(name: &str) -> FontFace {
+/// Unwrap a config field the merged base config is expected to define. A missing
+/// one means the shipped `/usr/share/tiny-dfr/config.toml` is incomplete (an
+/// install error), surfaced as an error rather than a panic.
+fn require<T>(value: Option<T>, key: &str) -> Result<T> {
+    value.ok_or_else(|| anyhow!("config is missing required key `{key}`"))
+}
+
+fn load_font(name: &str) -> Result<FontFace> {
     let fontconfig = FontConfig::new();
     let mut pattern = Pattern::new(name);
     fontconfig.perform_substitutions(&mut pattern);
-    let pat_match = match fontconfig.match_pattern(&pattern) {
-        Ok(pat) => pat,
-        Err(_) => panic!("Unable to find specified font. If you are using the default config, make sure you have at least one font installed")
-    };
+    let pat_match = fontconfig.match_pattern(&pattern).map_err(|_| {
+        anyhow!("no font matches template '{name}'; ensure at least one font is installed")
+    })?;
     let file_name = pat_match.get_file_name();
     let file_idx = pat_match.get_font_index();
-    let ft_library = FtLibrary::init().unwrap();
-    let face = ft_library.new_face(file_name, file_idx).unwrap();
-    FontFace::create_from_ft(&face).unwrap()
+    let ft_library = FtLibrary::init().map_err(|e| anyhow!("FreeType init failed: {e}"))?;
+    let face = ft_library
+        .new_face(file_name, file_idx)
+        .map_err(|e| anyhow!("loading font face '{file_name}': {e}"))?;
+    FontFace::create_from_ft(&face).map_err(|e| anyhow!("creating cairo font face: {e}"))
 }
 
-fn load_config(width: u16) -> (Config, LayerStore) {
-    let mut base =
-        toml::from_str::<ConfigProxy>(&read_to_string("/usr/share/tiny-dfr/config.toml").unwrap())
-            .unwrap();
-    let user = read_to_string(USER_CFG_PATH)
-        .map_err::<Error, _>(|e| e.into())
-        .and_then(|r| Ok(toml::from_str::<ConfigProxy>(&r)?));
-    if let Ok(user) = user {
-        base.media_layer_default = user.media_layer_default.or(base.media_layer_default);
-        base.show_button_outlines = user.show_button_outlines.or(base.show_button_outlines);
-        base.enable_pixel_shift = user.enable_pixel_shift.or(base.enable_pixel_shift);
-        base.font_template = user.font_template.or(base.font_template);
-        base.adaptive_brightness = user.adaptive_brightness.or(base.adaptive_brightness);
-        base.media_layer_keys = user.media_layer_keys.or(base.media_layer_keys);
-        base.primary_layer_keys = user.primary_layer_keys.or(base.primary_layer_keys);
-        base.active_brightness = user.active_brightness.or(base.active_brightness);
-        base.double_press_switch_layers = user
-            .double_press_switch_layers
-            .or(base.double_press_switch_layers);
-    };
-    let mut media_layer_keys = base.media_layer_keys.unwrap();
-    let mut primary_layer_keys = base.primary_layer_keys.unwrap();
+fn load_config(width: u16) -> Result<(Config, LayerStore)> {
+    let base_str = read_to_string("/usr/share/tiny-dfr/config.toml")
+        .context("reading /usr/share/tiny-dfr/config.toml")?;
+    let mut base = toml::from_str::<ConfigProxy>(&base_str)
+        .context("parsing /usr/share/tiny-dfr/config.toml")?;
+
+    // A user config is optional (absence is normal), but if one exists it must
+    // parse — surfacing the error rejects the reload and keeps the running config,
+    // rather than silently reverting to the shipped defaults.
+    match read_to_string(USER_CFG_PATH) {
+        Ok(user_str) => {
+            let user = toml::from_str::<ConfigProxy>(&user_str)
+                .with_context(|| format!("parsing {USER_CFG_PATH}"))?;
+            base.media_layer_default = user.media_layer_default.or(base.media_layer_default);
+            base.show_button_outlines = user.show_button_outlines.or(base.show_button_outlines);
+            base.enable_pixel_shift = user.enable_pixel_shift.or(base.enable_pixel_shift);
+            base.font_template = user.font_template.or(base.font_template);
+            base.adaptive_brightness = user.adaptive_brightness.or(base.adaptive_brightness);
+            base.media_layer_keys = user.media_layer_keys.or(base.media_layer_keys);
+            base.primary_layer_keys = user.primary_layer_keys.or(base.primary_layer_keys);
+            base.active_brightness = user.active_brightness.or(base.active_brightness);
+            base.double_press_switch_layers = user
+                .double_press_switch_layers
+                .or(base.double_press_switch_layers);
+        }
+        Err(e) if e.kind() == ErrorKind::NotFound => {}
+        Err(e) => return Err(anyhow::Error::from(e).context(format!("reading {USER_CFG_PATH}"))),
+    }
+    let mut media_layer_keys = require(base.media_layer_keys.take(), "MediaLayerKeys")?;
+    let mut primary_layer_keys = require(base.primary_layer_keys.take(), "PrimaryLayerKeys")?;
     if width >= 2170 {
         for layer in [&mut media_layer_keys, &mut primary_layer_keys] {
             layer.insert(
@@ -145,8 +161,10 @@ fn load_config(width: u16) -> (Config, LayerStore) {
             );
         }
     }
-    let media_layer = FunctionLayer::with_config(media_layer_keys);
-    let fkey_layer = FunctionLayer::with_config(primary_layer_keys);
+    let media_layer =
+        FunctionLayer::with_config(media_layer_keys).context("building the media layer")?;
+    let fkey_layer =
+        FunctionLayer::with_config(primary_layer_keys).context("building the primary layer")?;
     let mut registry = HashMap::new();
     registry.insert("media".to_string(), media_layer);
     registry.insert("fkeys".to_string(), fkey_layer);
@@ -164,26 +182,29 @@ fn load_config(width: u16) -> (Config, LayerStore) {
         FunctionLayer::slider_layer(Box::new(VolumeSlider)),
     );
     // base_order[0] = shown when Fn is not held; base_order[1] = shown while Fn held.
-    let base_order = if base.media_layer_default.unwrap() {
+    let base_order = if require(base.media_layer_default, "MediaLayerDefault")? {
         ["media".to_string(), "fkeys".to_string()]
     } else {
         ["fkeys".to_string(), "media".to_string()]
     };
     let cfg = Config {
-        show_button_outlines: base.show_button_outlines.unwrap(),
-        enable_pixel_shift: base.enable_pixel_shift.unwrap(),
-        adaptive_brightness: base.adaptive_brightness.unwrap(),
-        font_face: load_font(&base.font_template.unwrap()),
-        active_brightness: base.active_brightness.unwrap(),
-        double_press_switch_layers: base.double_press_switch_layers.unwrap(),
+        show_button_outlines: require(base.show_button_outlines, "ShowButtonOutlines")?,
+        enable_pixel_shift: require(base.enable_pixel_shift, "EnablePixelShift")?,
+        adaptive_brightness: require(base.adaptive_brightness, "AdaptiveBrightness")?,
+        font_face: load_font(&require(base.font_template, "FontTemplate")?)?,
+        active_brightness: require(base.active_brightness, "ActiveBrightness")?,
+        double_press_switch_layers: require(
+            base.double_press_switch_layers,
+            "DoublePressSwitchLayers",
+        )?,
     };
-    (
+    Ok((
         cfg,
         LayerStore {
             registry,
             base_order,
         },
-    )
+    ))
 }
 
 pub struct ConfigManager {
@@ -209,7 +230,7 @@ impl ConfigManager {
             watch_desc,
         }
     }
-    pub fn load_config(&self, width: u16) -> (Config, LayerStore) {
+    pub fn load_config(&self, width: u16) -> Result<(Config, LayerStore)> {
         load_config(width)
     }
     pub fn update_config(&mut self, cfg: &mut Config, store: &mut LayerStore, width: u16) -> bool {
@@ -230,15 +251,33 @@ impl ConfigManager {
         width: u16,
         evts: Result<Vec<InotifyEvent>, Errno>,
     ) -> bool {
+        let evts = match evts {
+            Ok(evts) => evts,
+            Err(e) => {
+                eprintln!("inotify read failed, skipping config reload: {e}");
+                return false;
+            }
+        };
         let mut ret = false;
-        for evt in evts.unwrap() {
+        for evt in evts {
             if Some(evt.wd) != self.watch_desc {
                 continue;
             }
-            let parts = load_config(width);
-            *cfg = parts.0;
-            *store = parts.1;
-            ret = true;
+            match load_config(width) {
+                Ok((new_cfg, new_store)) => {
+                    *cfg = new_cfg;
+                    *store = new_store;
+                    ret = true;
+                }
+                Err(e) => {
+                    eprintln!("config reload failed, keeping the previous config: {e:#}");
+                }
+            }
+            // Re-arm AFTER the load: load_config reads (opens+closes) the watched
+            // file, and the watch includes IN_CLOSE — re-arming beforehand would
+            // catch that close and spin an endless reload loop. IN_ONESHOT already
+            // consumed the firing watch, so re-arm unconditionally (even on a failed
+            // load) so a later fixing edit still triggers a reload.
             self.watch_desc = arm_inotify(&self.inotify_fd);
         }
         ret

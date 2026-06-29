@@ -154,16 +154,15 @@ impl KeyButton {
         icon_width: i32,
         icon_height: i32,
         open_layer: Option<String>,
-    ) -> KeyButton {
-        let content =
-            try_load_image(path, theme, icon_width, icon_height).expect("failed to load icon");
-        KeyButton {
+    ) -> Result<KeyButton> {
+        let content = try_load_image(path, theme, icon_width, icon_height)?;
+        Ok(KeyButton {
             keys,
             content,
             icon_width: icon_width as f64,
             icon_height: icon_height as f64,
             open_layer,
-        }
+        })
     }
     fn render(
         &self,
@@ -236,12 +235,14 @@ impl Button {
     /// Build an interactive button from its config. Only the text/icon cases
     /// live here; the indicator/battery-N/A/spacer dispatch is decided one level
     /// up in [`crate::widgets::Widget::from_config`].
-    pub(crate) fn from_config(cfg: ButtonConfig) -> Button {
+    pub(crate) fn from_config(cfg: ButtonConfig) -> Result<Button> {
         let open_layer = cfg.open_layer.clone();
         let backend = if let Some(text) = cfg.text {
             KeyButton::new_text(text, cfg.action, open_layer)
         } else {
-            let icon = cfg.icon.expect("Button::from_config requires text or icon");
+            let icon = cfg
+                .icon
+                .ok_or_else(|| anyhow!("button config requires either text or icon"))?;
             KeyButton::new_icon(
                 &icon,
                 cfg.theme,
@@ -249,9 +250,9 @@ impl Button {
                 cfg.icon_width.unwrap_or(DEFAULT_ICON_SIZE),
                 cfg.icon_height.unwrap_or(DEFAULT_ICON_SIZE),
                 open_layer,
-            )
+            )?
         };
-        Button::new(Box::new(backend))
+        Ok(Button::new(Box::new(backend)))
     }
 
     /// Press edge: light the transient highlight (unless this hands off to a

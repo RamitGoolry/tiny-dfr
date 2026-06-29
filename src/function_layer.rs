@@ -1,3 +1,4 @@
+use anyhow::{anyhow, Result};
 use cairo::{Context, Surface};
 use drm::control::ClipRect;
 
@@ -17,35 +18,33 @@ pub struct FunctionLayer {
 }
 
 impl FunctionLayer {
-    pub(crate) fn with_config(cfg: Vec<ButtonConfig>) -> FunctionLayer {
+    pub(crate) fn with_config(cfg: Vec<ButtonConfig>) -> Result<FunctionLayer> {
         if cfg.is_empty() {
-            panic!("Invalid configuration, layer has 0 buttons");
+            return Err(anyhow!("layer has 0 buttons"));
         }
 
         let mut virtual_button_count = 0;
-        let cells = cfg
-            .into_iter()
-            .map(|cfg| {
-                let mut stretch = cfg.stretch.unwrap_or(1);
-                if stretch < 1 {
-                    println!("Stretch value must be at least 1, setting to 1.");
-                    stretch = 1;
-                }
-                virtual_button_count += stretch;
-                Cell {
-                    stretch,
-                    widget: Widget::from_config(cfg),
-                }
-            })
-            .collect::<Vec<_>>();
+        let mut cells = Vec::with_capacity(cfg.len());
+        for cfg in cfg {
+            let mut stretch = cfg.stretch.unwrap_or(1);
+            if stretch < 1 {
+                println!("Stretch value must be at least 1, setting to 1.");
+                stretch = 1;
+            }
+            virtual_button_count += stretch;
+            cells.push(Cell {
+                stretch,
+                widget: Widget::from_config(cfg)?,
+            });
+        }
         let displays_time = cells.iter().any(|c| c.widget.is_clock());
         let faster_refresh = cells.iter().any(|c| c.widget.needs_faster_refresh());
-        FunctionLayer {
+        Ok(FunctionLayer {
             displays_time,
             cells,
             virtual_button_count,
             faster_refresh,
-        }
+        })
     }
     /// A full-bar modal slider layer: one stretched `Slider` cell wrapping the
     /// given backend (brightness, keyboard illumination, volume, …).
