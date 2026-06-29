@@ -18,7 +18,7 @@ const DIGITIZER_NAME: &str = "Apple Inc. iBridge Touchpad";
 /// After BTN_TOUCH drops, how long the position stream must stay quiet before we
 /// call the touch released. A still-hold keeps BTN_TOUCH=1 (never times out); a
 /// moving lift releases this long after the last motion.
-const RELEASE_TIMEOUT: Duration = Duration::from_millis(150);
+const RELEASE_TIMEOUT: Duration = Duration::from_millis(60);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum TouchPhase {
@@ -85,6 +85,13 @@ impl TouchReader {
 
     pub fn as_fd(&self) -> BorrowedFd<'_> {
         self.evdev.as_fd()
+    }
+
+    /// True while a touch is in flight (Down seen, Up not yet emitted). The main
+    /// loop polls on this so the time-based release fires without waiting out the
+    /// idle epoll timeout.
+    pub fn is_down(&self) -> bool {
+        self.down
     }
 
     fn map_x(&self, abs_x: i32) -> f64 {

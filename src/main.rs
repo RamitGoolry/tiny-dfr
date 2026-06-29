@@ -60,6 +60,19 @@ const BUTTON_COLOR_INACTIVE: f64 = 0.200;
 const BUTTON_COLOR_ACTIVE: f64 = 0.400;
 const DEFAULT_ICON_SIZE: i32 = 48;
 const TIMEOUT_MS: i32 = 10 * 1000;
+/// While a touch is in flight, cap the epoll wait this low so the time-based touch
+/// release (TouchReader::check_release) fires promptly instead of sleeping out
+/// TIMEOUT_MS. Keep it <= the reader's RELEASE_TIMEOUT.
+const TOUCH_ACTIVE_POLL_MS: i32 = 16;
+
+/// Wall-clock epoch seconds for [dbg] log timestamps — lines up with evtest's
+/// `time …` stamps so device events and daemon handling can be correlated.
+fn dbg_ts() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum BatteryState {
@@ -545,7 +558,7 @@ impl Button {
         if self.active != active {
             self.active = active;
             self.changed = true;
-            eprintln!("[dbg] set_active={} key={:?}", active, self.action.first());
+            eprintln!("[dbg {:.6}] set_active={} key={:?}", dbg_ts(), active, self.action.first());
             toggle_keys(uinput, &self.action, active as i32);
         }
     }
@@ -934,6 +947,7 @@ fn real_main(drm: &mut DrmBackend) {
         ImageSurface::create(Format::ARgb32, db_width as i32, db_height as i32).unwrap();
     let mut rstate = ResolverState::default();
     let mut needs_complete_redraw = true;
+    let mut prev_active = String::new();
 
     let mut input_main = Libinput::new_with_udev(Interface);
     input_main.udev_assign_seat("seat0").unwrap();
@@ -997,6 +1011,10 @@ fn real_main(drm: &mut DrmBackend) {
             needs_complete_redraw = true;
         }
         let active = store.resolve(&rstate);
+        if active != prev_active {
+            eprintln!("[dbg {:.6}] LAYER {} -> {}", dbg_ts(), prev_active, active);
+            prev_active = active.clone();
+        }
 
         let now = Local::now();
         let ms_left = ((60 - now.second()) * 1000) as i32;
@@ -1008,6 +1026,13 @@ fn real_main(drm: &mut DrmBackend) {
                 needs_complete_redraw = true;
             }
             next_timeout_ms = min(next_timeout_ms, pixel_shift_next_timeout_ms);
+        }
+
+        // A touch awaiting release is on a timer, not an fd event — poll fast
+        // enough to catch it, else the loop sleeps up to TIMEOUT_MS and the
+        // release (and the key-up it sends) lags by seconds.
+        if touch_reader.as_ref().is_some_and(|r| r.is_down()) {
+            next_timeout_ms = min(next_timeout_ms, TOUCH_ACTIVE_POLL_MS);
         }
 
         let current_ts = if store.get(&active).faster_refresh() {
@@ -1046,7 +1071,8 @@ fn real_main(drm: &mut DrmBackend) {
             drm.dirty(&clips).unwrap();
             let t_dirty = t_d.elapsed();
             eprintln!(
-                "[dbg] REDRAW draw={}ms dirty={}ms clips={} complete={}",
+                "[dbg {:.6}] REDRAW draw={}ms dirty={}ms clips={} complete={}",
+                dbg_ts(),
                 t_draw.as_millis(),
                 t_dirty.as_millis(),
                 clips.len(),
@@ -1101,7 +1127,8 @@ fn real_main(drm: &mut DrmBackend) {
         // Only log when the input path itself is slow, to catch the stall bursts.
         if t_drain.as_millis() > 50 || n_events > 100 {
             eprintln!(
-                "[dbg] INPUT dispatch={}ms drain_total={}ms events={}",
+                "[dbg {:.6}] INPUT dispatch={}ms drain_total={}ms events={}",
+                dbg_ts(),
                 t_dispatch.as_millis(),
                 t_drain.as_millis(),
                 n_events
@@ -1129,7 +1156,7 @@ fn real_main(drm: &mut DrmBackend) {
                             Layer::Buttons(fl) => fl.hit(width, height, x, y, None),
                             Layer::Slider(_) => None,
                         };
-                        eprintln!("[dbg] DOWN x={x:.0} y={y:.0} hit={hit:?}");
+                        eprintln!("[dbg {:.6}] DOWN x={x:.0} y={y:.0} hit={hit:?}", dbg_ts());
                         if let Some(btn) = hit {
                             let trigger = match store.get(&active) {
                                 Layer::Buttons(fl) => fl.buttons[btn].1.open_layer.clone(),
@@ -1177,7 +1204,7 @@ fn real_main(drm: &mut DrmBackend) {
                             let layer = layer.clone();
                             if let Layer::Slider(s) = store.get_mut(&layer) {
                                 let level = s.drag(x, width as f64);
-                                eprintln!("[dbg] DRAG x={x:.0} level={level:.2}");
+                                eprintln!("[dbg {:.6}] DRAG x={x:.0} level={level:.2}", dbg_ts());
                                 match s.backend {
                                     SliderBackend::Brightness => backlight.set_display_level(level),
                                 }
@@ -1187,7 +1214,7 @@ fn real_main(drm: &mut DrmBackend) {
                     },
                     TouchPhase::Up => {
                         let removed = touches.remove(&0);
-                        eprintln!("[dbg] UP removed={}", removed.is_some());
+                        eprintln!("[dbg {:.6}] UP removed={}", dbg_ts(), removed.is_some());
                         end_touch(
                             removed,
                             &mut store,
