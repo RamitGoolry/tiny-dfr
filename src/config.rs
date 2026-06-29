@@ -1,6 +1,6 @@
 use crate::fonts::{FontConfig, Pattern};
 use crate::layer::{Layer, LayerStore, Slider, SliderBackend};
-use crate::FunctionLayer;
+use crate::function_layer::FunctionLayer;
 use anyhow::Error;
 use cairo::FontFace;
 use freetype::Library as FtLibrary;

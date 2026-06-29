@@ -1,5 +1,5 @@
 use crate::config::Config;
-use crate::FunctionLayer;
+use crate::function_layer::FunctionLayer;
 use cairo::{Context, Surface};
 use drm::control::ClipRect;
 use std::collections::HashMap;
