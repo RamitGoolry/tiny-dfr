@@ -54,6 +54,43 @@ pub(crate) trait IndicatorBackend {
     fn needs_faster_refresh(&self) -> bool {
         false
     }
+    /// Render the passive indicator into its slot: no chrome box, no active
+    /// highlight. On a partial redraw it clears the same cell extent a `Button`
+    /// would (so damage lines up) before painting content, then returns the
+    /// matching `ClipRect`; on a complete redraw the layer already cleared and
+    /// damaged the whole bar. Default for every indicator; backends supply only
+    /// `draw_content`.
+    fn draw(
+        &self,
+        c: &Context,
+        region: &Region,
+        state: &State,
+        complete_redraw: bool,
+    ) -> Vec<ClipRect> {
+        let radius = 8.0f64;
+        let bot = (region.height as f64) * 0.15;
+        let top = (region.height as f64) * 0.85;
+        let left_edge = region.left;
+        let button_width = region.width;
+
+        if !complete_redraw {
+            c.set_source_rgb(0.0, 0.0, 0.0);
+            c.rectangle(left_edge, bot - radius, button_width, top - bot + radius * 2.0);
+            c.fill().unwrap();
+        }
+        self.draw_content(c, region, state);
+
+        if complete_redraw {
+            vec![]
+        } else {
+            vec![ClipRect::new(
+                region.height as u16 - top as u16 - radius as u16,
+                left_edge as u16,
+                region.height as u16 - bot as u16 + radius as u16,
+                left_edge as u16 + button_width as u16,
+            )]
+        }
+    }
 }
 
 /// The effect a [`Slider`] drives. Every slider grabs/drags/throttles/draws
@@ -135,7 +172,7 @@ impl Widget {
         match self {
             Widget::Button(b) => b.draw(c, cfg, region, state, complete_redraw),
             Widget::Slider(s) => s.draw(c, width, region.height, complete_redraw),
-            Widget::Indicator(b) => draw_indicator(c, b.as_ref(), region, state, complete_redraw),
+            Widget::Indicator(b) => b.draw(c, region, state, complete_redraw),
             Widget::Spacer => vec![],
         }
     }
@@ -149,38 +186,3 @@ impl Widget {
     }
 }
 
-/// Render a passive indicator into its slot: no chrome box, no active highlight.
-/// On a partial redraw it clears the same cell extent a `Button` would (so damage
-/// lines up) before painting the content, then returns the matching `ClipRect`;
-/// on a complete redraw the layer already cleared and damaged the whole bar.
-fn draw_indicator(
-    c: &Context,
-    backend: &dyn IndicatorBackend,
-    region: &Region,
-    state: &State,
-    complete_redraw: bool,
-) -> Vec<ClipRect> {
-    let radius = 8.0f64;
-    let bot = (region.height as f64) * 0.15;
-    let top = (region.height as f64) * 0.85;
-    let left_edge = region.left;
-    let button_width = region.width;
-
-    if !complete_redraw {
-        c.set_source_rgb(0.0, 0.0, 0.0);
-        c.rectangle(left_edge, bot - radius, button_width, top - bot + radius * 2.0);
-        c.fill().unwrap();
-    }
-    backend.draw_content(c, region, state);
-
-    if complete_redraw {
-        vec![]
-    } else {
-        vec![ClipRect::new(
-            region.height as u16 - top as u16 - radius as u16,
-            left_edge as u16,
-            region.height as u16 - bot as u16 + radius as u16,
-            left_edge as u16 + button_width as u16,
-        )]
-    }
-}
