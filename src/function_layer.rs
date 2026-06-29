@@ -3,8 +3,8 @@ use drm::control::ClipRect;
 
 use crate::config::{ButtonConfig, Config};
 use crate::pixel_shift::PIXEL_SHIFT_WIDTH_PX;
-use crate::widgets::{Button, ButtonImage};
-use crate::{BUTTON_COLOR_ACTIVE, BUTTON_COLOR_INACTIVE, BUTTON_SPACING_PX};
+use crate::widgets::{Button, ButtonImage, Region};
+use crate::BUTTON_SPACING_PX;
 
 #[derive(Default)]
 pub struct FunctionLayer {
@@ -96,9 +96,6 @@ impl FunctionLayer {
             - (BUTTON_SPACING_PX * (self.virtual_button_count - 1) as i32))
             as f64
             / self.virtual_button_count as f64;
-        let radius = 8.0f64;
-        let bot = (height as f64) * 0.15;
-        let top = (height as f64) * 0.85;
         let (pixel_shift_x, pixel_shift_y) = pixel_shift;
 
         if complete_redraw {
@@ -130,79 +127,13 @@ impl FunctionLayer {
                 + ((end - start - 1) as f64 * (virtual_button_width + BUTTON_SPACING_PX as f64))
                     .floor();
 
-            let color = if button.active {
-                BUTTON_COLOR_ACTIVE
-            } else if config.show_button_outlines {
-                BUTTON_COLOR_INACTIVE
-            } else {
-                0.0
-            };
-            if !complete_redraw {
-                c.set_source_rgb(0.0, 0.0, 0.0);
-                c.rectangle(
-                    left_edge,
-                    bot - radius,
-                    button_width,
-                    top - bot + radius * 2.0,
-                );
-                c.fill().unwrap();
-            }
-            if !matches!(button.image, ButtonImage::Spacer) {
-                button.set_background_color(&c, color);
-                // draw box with rounded corners
-                c.new_sub_path();
-                let left = left_edge + radius;
-                let right = (left_edge + button_width.ceil()) - radius;
-                c.arc(
-                    right,
-                    bot,
-                    radius,
-                    (-90.0f64).to_radians(),
-                    (0.0f64).to_radians(),
-                );
-                c.arc(
-                    right,
-                    top,
-                    radius,
-                    (0.0f64).to_radians(),
-                    (90.0f64).to_radians(),
-                );
-                c.arc(
-                    left,
-                    top,
-                    radius,
-                    (90.0f64).to_radians(),
-                    (180.0f64).to_radians(),
-                );
-                c.arc(
-                    left,
-                    bot,
-                    radius,
-                    (180.0f64).to_radians(),
-                    (270.0f64).to_radians(),
-                );
-                c.close_path();
-                c.fill().unwrap();
-            }
-            c.set_source_rgb(1.0, 1.0, 1.0);
-            button.render(
-                &c,
+            let region = Region {
+                left: left_edge,
+                width: button_width,
                 height,
-                left_edge,
-                button_width.ceil() as u64,
-                pixel_shift_y,
-            );
-
-            button.changed = false;
-
-            if !complete_redraw {
-                modified_regions.push(ClipRect::new(
-                    height as u16 - top as u16 - radius as u16,
-                    left_edge as u16,
-                    height as u16 - bot as u16 + radius as u16,
-                    left_edge as u16 + button_width as u16,
-                ));
-            }
+                y_shift: pixel_shift_y,
+            };
+            modified_regions.extend(button.draw(&c, config, &region, complete_redraw));
         }
 
         modified_regions

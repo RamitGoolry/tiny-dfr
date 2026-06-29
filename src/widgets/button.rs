@@ -10,11 +10,14 @@ use freedesktop_icons::lookup;
 use input_linux::{uinput::UInputHandle, Key};
 use librsvg_rebind::{prelude::HandleExt, Handle, Rectangle};
 
+use drm::control::ClipRect;
+
 use crate::battery::find_battery_device;
-use crate::config::ButtonConfig;
+use crate::config::{ButtonConfig, Config};
 use crate::input::toggle_keys;
 use crate::widgets::indicator::Indicator;
-use crate::{dbg_ts, DEFAULT_ICON_SIZE};
+use crate::widgets::Region;
+use crate::{dbg_ts, BUTTON_COLOR_ACTIVE, BUTTON_COLOR_INACTIVE, DEFAULT_ICON_SIZE};
 
 pub(crate) enum ButtonImage {
     Text(String),
@@ -273,6 +276,63 @@ impl Button {
             ind.background_color(c, color)
         } else {
             c.set_source_rgb(color, color, color);
+        }
+    }
+    /// Render this button into its slot: the rounded chrome box (active or
+    /// outline coloured), then the content. Returns the damage rect on a partial
+    /// redraw (empty on a complete one, which the layer already damages whole).
+    /// The cairo context is already rotated by the layer.
+    pub(crate) fn draw(
+        &mut self,
+        c: &Context,
+        config: &Config,
+        region: &Region,
+        complete_redraw: bool,
+    ) -> Vec<ClipRect> {
+        let radius = 8.0f64;
+        let bot = (region.height as f64) * 0.15;
+        let top = (region.height as f64) * 0.85;
+        let left_edge = region.left;
+        let button_width = region.width;
+
+        let color = if self.active {
+            BUTTON_COLOR_ACTIVE
+        } else if config.show_button_outlines {
+            BUTTON_COLOR_INACTIVE
+        } else {
+            0.0
+        };
+        if !complete_redraw {
+            c.set_source_rgb(0.0, 0.0, 0.0);
+            c.rectangle(left_edge, bot - radius, button_width, top - bot + radius * 2.0);
+            c.fill().unwrap();
+        }
+        if !matches!(self.image, ButtonImage::Spacer) {
+            self.set_background_color(c, color);
+            // draw box with rounded corners
+            c.new_sub_path();
+            let left = left_edge + radius;
+            let right = (left_edge + button_width.ceil()) - radius;
+            c.arc(right, bot, radius, (-90.0f64).to_radians(), (0.0f64).to_radians());
+            c.arc(right, top, radius, (0.0f64).to_radians(), (90.0f64).to_radians());
+            c.arc(left, top, radius, (90.0f64).to_radians(), (180.0f64).to_radians());
+            c.arc(left, bot, radius, (180.0f64).to_radians(), (270.0f64).to_radians());
+            c.close_path();
+            c.fill().unwrap();
+        }
+        c.set_source_rgb(1.0, 1.0, 1.0);
+        self.render(c, region.height, left_edge, button_width.ceil() as u64, region.y_shift);
+        self.changed = false;
+
+        if complete_redraw {
+            vec![]
+        } else {
+            vec![ClipRect::new(
+                region.height as u16 - top as u16 - radius as u16,
+                left_edge as u16,
+                region.height as u16 - bot as u16 + radius as u16,
+                left_edge as u16 + button_width as u16,
+            )]
         }
     }
 }
