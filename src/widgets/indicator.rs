@@ -1,4 +1,4 @@
-use cairo::Context;
+use cairo::{Context, Format, ImageSurface};
 use chrono::{
     format::{Item as ChronoItem, StrftimeItems},
     Local, Locale,
@@ -189,11 +189,25 @@ impl Indicator {
                     let x = button_left_edge + (button_width as f64 / 2.0 - width / 2.0).round();
                     let y = y_shift + ((height as f64 - DEFAULT_ICON_SIZE as f64) / 2.0).round();
 
+                    // librsvg ignores the cairo source colour, so render the
+                    // glyph to a stencil and paint the current source (the charge
+                    // colour, set in `draw`) through its alpha. Doing the SVG
+                    // render on a separate context also keeps it from resetting
+                    // `c`'s source, so the % text below stays tinted too.
+                    let stencil =
+                        ImageSurface::create(Format::ARgb32, DEFAULT_ICON_SIZE, DEFAULT_ICON_SIZE)
+                            .unwrap();
                     svg.render_document(
-                        c,
-                        &Rectangle::new(x, y, DEFAULT_ICON_SIZE as f64, DEFAULT_ICON_SIZE as f64),
+                        &Context::new(&stencil).unwrap(),
+                        &Rectangle::new(
+                            0.0,
+                            0.0,
+                            DEFAULT_ICON_SIZE as f64,
+                            DEFAULT_ICON_SIZE as f64,
+                        ),
                     )
                     .unwrap();
+                    c.mask_surface(&stencil, x, y).unwrap();
                 }
                 if battery_mode.should_draw_text() {
                     c.move_to(
