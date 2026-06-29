@@ -1,20 +1,20 @@
 use std::{
     fs::File,
-    os::fd::AsRawFd,
     path::{Path, PathBuf},
 };
 
 use anyhow::{anyhow, Result};
 use cairo::{Antialias, Context, Format, ImageSurface};
 use freedesktop_icons::lookup;
-use input_linux::{uinput::UInputHandle, Key};
+use input_linux::Key;
 use librsvg_rebind::{prelude::HandleExt, Handle, Rectangle};
 
 use drm::control::ClipRect;
 
+use crate::action::{Action, Edge};
 use crate::config::{ButtonConfig, Config};
-use crate::input::toggle_keys;
-use crate::widgets::Region;
+use crate::state::State;
+use crate::widgets::{ButtonBackend, Region};
 use crate::{dbg_ts, BUTTON_COLOR_ACTIVE, BUTTON_COLOR_INACTIVE, DEFAULT_ICON_SIZE};
 
 pub(crate) enum ButtonImage {
@@ -23,16 +23,29 @@ pub(crate) enum ButtonImage {
     Bitmap(ImageSurface),
 }
 
+/// Shared interactive button UI: the chrome box plus the transient press
+/// highlight (`active`, governed by `sticky`). The behavior — what it draws and
+/// what it emits — lives in the `backend`.
 pub(crate) struct Button {
-    pub(crate) image: ButtonImage,
     pub(crate) changed: bool,
     pub(crate) active: bool,
-    action: Vec<Key>,
+    /// A local latch: when set, a press toggles `active` and it stays after
+    /// release. Always false for now (no config yet) — preserving today's
+    /// transient-only highlight.
+    sticky: bool,
+    backend: Box<dyn ButtonBackend>,
+}
+
+/// The default button behavior: render a static image and emit configured keys
+/// on press/release, or open a modal layer instead of sending a key.
+pub(crate) struct KeyButton {
+    keys: Vec<Key>,
+    content: ButtonImage,
     icon_width: f64,
     icon_height: f64,
-    /// If set, touching this button opens the named layer as a momentary modal
-    /// (e.g. a slider) instead of sending its key.
-    pub(crate) open_layer: Option<String>,
+    /// If set, pressing this button opens the named layer as a momentary modal
+    /// (e.g. a slider) instead of sending its keys.
+    open_layer: Option<String>,
 }
 
 fn try_load_svg(path: &str) -> Result<ButtonImage> {
@@ -124,58 +137,35 @@ pub(crate) fn try_load_image(
     Err(last_err.context(format!("failed loading all possible paths for icon {name}")))
 }
 
-impl Button {
-    /// Build an interactive button from its config. Only the text/icon cases
-    /// live here; the indicator/battery-N/A/spacer dispatch is decided one level
-    /// up in [`crate::widgets::Widget::from_config`].
-    pub(crate) fn from_config(cfg: ButtonConfig) -> Button {
-        let open_layer = cfg.open_layer.clone();
-        let mut button = if let Some(text) = cfg.text {
-            Button::new_text(text, cfg.action)
-        } else {
-            let icon = cfg.icon.expect("Button::from_config requires text or icon");
-            Button::new_icon(
-                &icon,
-                cfg.theme,
-                cfg.action,
-                cfg.icon_width.unwrap_or(DEFAULT_ICON_SIZE),
-                cfg.icon_height.unwrap_or(DEFAULT_ICON_SIZE),
-            )
-        };
-        button.open_layer = open_layer;
-        button
-    }
-    pub(crate) fn new_text(text: String, action: Vec<Key>) -> Button {
-        Button {
-            action,
-            active: false,
-            changed: false,
-            image: ButtonImage::Text(text),
+impl KeyButton {
+    pub(crate) fn new_text(text: String, keys: Vec<Key>, open_layer: Option<String>) -> KeyButton {
+        KeyButton {
+            keys,
+            content: ButtonImage::Text(text),
             icon_width: 0.0,
             icon_height: 0.0,
-            open_layer: None,
+            open_layer,
         }
     }
     fn new_icon(
         path: impl AsRef<str>,
         theme: Option<impl AsRef<str>>,
-        action: Vec<Key>,
+        keys: Vec<Key>,
         icon_width: i32,
         icon_height: i32,
-    ) -> Button {
-        let image =
+        open_layer: Option<String>,
+    ) -> KeyButton {
+        let content =
             try_load_image(path, theme, icon_width, icon_height).expect("failed to load icon");
-        Button {
-            action,
-            image,
+        KeyButton {
+            keys,
+            content,
             icon_width: icon_width as f64,
             icon_height: icon_height as f64,
-            active: false,
-            changed: false,
-            open_layer: None,
+            open_layer,
         }
     }
-    pub(crate) fn render(
+    fn render(
         &self,
         c: &Context,
         height: i32,
@@ -183,7 +173,7 @@ impl Button {
         button_width: u64,
         y_shift: f64,
     ) {
-        match &self.image {
+        match &self.content {
             ButtonImage::Text(text) => {
                 let extents = c.text_extents(text).unwrap();
                 c.move_to(
@@ -210,23 +200,101 @@ impl Button {
             }
         }
     }
-    pub(crate) fn set_active<F>(&mut self, uinput: &mut UInputHandle<F>, active: bool)
-    where
-        F: AsRawFd,
-    {
-        if self.active != active {
-            self.active = active;
-            self.changed = true;
-            eprintln!(
-                "[dbg {:.6}] set_active={} key={:?}",
-                dbg_ts(),
-                active,
-                self.action.first()
-            );
-            toggle_keys(uinput, &self.action, active as i32);
+}
+
+impl ButtonBackend for KeyButton {
+    fn draw_content(&self, c: &Context, r: &Region, _s: &State) {
+        self.render(c, r.height, r.left, r.width.ceil() as u64, r.y_shift);
+    }
+    fn on_press(&mut self, _s: &State) -> Option<Action> {
+        if let Some(layer) = &self.open_layer {
+            Some(Action::OpenModal(layer.clone()))
+        } else if self.keys.is_empty() {
+            None
+        } else {
+            Some(Action::Key(self.keys.clone(), Edge::Press))
         }
     }
-    pub(crate) fn set_background_color(&self, c: &Context, color: f64) {
+    fn on_release(&mut self, _s: &State) -> Option<Action> {
+        if self.open_layer.is_some() || self.keys.is_empty() {
+            None
+        } else {
+            Some(Action::Key(self.keys.clone(), Edge::Release))
+        }
+    }
+}
+
+impl Button {
+    pub(crate) fn new(backend: Box<dyn ButtonBackend>) -> Button {
+        Button {
+            changed: false,
+            active: false,
+            sticky: false,
+            backend,
+        }
+    }
+    /// Build an interactive button from its config. Only the text/icon cases
+    /// live here; the indicator/battery-N/A/spacer dispatch is decided one level
+    /// up in [`crate::widgets::Widget::from_config`].
+    pub(crate) fn from_config(cfg: ButtonConfig) -> Button {
+        let open_layer = cfg.open_layer.clone();
+        let backend = if let Some(text) = cfg.text {
+            KeyButton::new_text(text, cfg.action, open_layer)
+        } else {
+            let icon = cfg.icon.expect("Button::from_config requires text or icon");
+            KeyButton::new_icon(
+                &icon,
+                cfg.theme,
+                cfg.action,
+                cfg.icon_width.unwrap_or(DEFAULT_ICON_SIZE),
+                cfg.icon_height.unwrap_or(DEFAULT_ICON_SIZE),
+                open_layer,
+            )
+        };
+        Button::new(Box::new(backend))
+    }
+
+    /// Press edge: light the transient highlight (unless this hands off to a
+    /// modal, which must not leave the trigger lit) and return the backend's
+    /// effect. Idempotent — re-pressing an already-active button is a no-op, so a
+    /// finger sliding within the button never re-emits.
+    pub(crate) fn on_press(&mut self, s: &State) -> Option<Action> {
+        let action = self.backend.on_press(s);
+        if matches!(action, Some(Action::OpenModal(_))) {
+            return action;
+        }
+        if self.active {
+            return None;
+        }
+        self.active = true;
+        self.changed = true;
+        let key = match &action {
+            Some(Action::Key(keys, _)) => keys.first().copied(),
+            _ => None,
+        };
+        eprintln!("[dbg {:.6}] set_active=true key={:?}", dbg_ts(), key);
+        action
+    }
+
+    /// Release edge: clear the highlight (unless `sticky`) and return the
+    /// backend's effect. Only acts when the button was actually active, so it
+    /// never emits a stray key-up after the finger has already left.
+    pub(crate) fn on_release(&mut self, s: &State) -> Option<Action> {
+        if self.sticky || !self.active {
+            return None;
+        }
+        self.active = false;
+        self.changed = true;
+        let action = self.backend.on_release(s);
+        let key = match &action {
+            Some(Action::Key(keys, _)) => keys.first().copied(),
+            _ => None,
+        };
+        eprintln!("[dbg {:.6}] set_active=false key={:?}", dbg_ts(), key);
+        action
+    }
+
+    fn set_background_color(&self, c: &Context, color: f64) {
         c.set_source_rgb(color, color, color);
     }
     /// Render this button into its slot: the rounded chrome box (active or
@@ -238,6 +306,7 @@ impl Button {
         c: &Context,
         config: &Config,
         region: &Region,
+        state: &State,
         complete_redraw: bool,
     ) -> Vec<ClipRect> {
         let radius = 8.0f64;
@@ -270,7 +339,7 @@ impl Button {
         c.close_path();
         c.fill().unwrap();
         c.set_source_rgb(1.0, 1.0, 1.0);
-        self.render(c, region.height, left_edge, button_width.ceil() as u64, region.y_shift);
+        self.backend.draw_content(c, region, state);
         self.changed = false;
 
         if complete_redraw {

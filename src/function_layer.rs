@@ -1,15 +1,16 @@
 use cairo::{Context, Surface};
 use drm::control::ClipRect;
 
+use crate::action::Action;
 use crate::config::{ButtonConfig, Config};
 use crate::pixel_shift::PIXEL_SHIFT_WIDTH_PX;
-use crate::widgets::{Button, Cell, Region, Widget};
-use crate::BUTTON_SPACING_PX;
+use crate::state::State;
+use crate::widgets::{BrightnessSlider, Cell, Region, Slider, Widget};
+use crate::{dbg_ts, BUTTON_SPACING_PX};
 
 #[derive(Default)]
 pub struct FunctionLayer {
     displays_time: bool,
-    displays_battery: bool,
     pub(crate) cells: Vec<Cell>,
     virtual_button_count: usize,
     faster_refresh: bool,
@@ -21,9 +22,6 @@ impl FunctionLayer {
             panic!("Invalid configuration, layer has 0 buttons");
         }
 
-        // Keep the battery flag config-based so the "no battery device" fallback
-        // (a "Battery N/A" button) still reports as a battery layer, as before.
-        let displays_battery = cfg.iter().any(|cfg| cfg.battery.is_some());
         let mut virtual_button_count = 0;
         let cells = cfg
             .into_iter()
@@ -44,10 +42,21 @@ impl FunctionLayer {
         let faster_refresh = cells.iter().any(|c| c.widget.needs_faster_refresh());
         FunctionLayer {
             displays_time,
-            displays_battery,
             cells,
             virtual_button_count,
             faster_refresh,
+        }
+    }
+    /// A full-bar modal slider layer: one stretched `Slider` cell.
+    pub(crate) fn brightness_slider() -> FunctionLayer {
+        FunctionLayer {
+            displays_time: false,
+            cells: vec![Cell {
+                stretch: 1,
+                widget: Widget::Slider(Slider::new(Box::new(BrightnessSlider))),
+            }],
+            virtual_button_count: 1,
+            faster_refresh: false,
         }
     }
     pub(crate) fn faster_refresh(&self) -> bool {
@@ -56,33 +65,52 @@ impl FunctionLayer {
     pub(crate) fn displays_time(&self) -> bool {
         self.displays_time
     }
-    pub(crate) fn displays_battery(&self) -> bool {
-        self.displays_battery
+    /// Whether anything in this layer needs repainting given the current state.
+    pub(crate) fn needs_redraw(&self, state: &State) -> bool {
+        self.cells.iter().any(|c| c.widget.changed(state))
     }
-    pub(crate) fn any_changed(&self) -> bool {
-        self.cells.iter().any(|c| c.widget.changed())
+    /// Press the interactive widget in cell `i`, returning its effect (if any).
+    pub(crate) fn on_press(&mut self, i: usize, state: &State) -> Option<Action> {
+        match self.cells.get_mut(i).map(|c| &mut c.widget) {
+            Some(Widget::Button(b)) => b.on_press(state),
+            _ => None,
+        }
     }
-    pub(crate) fn mark_batteries_changed(&mut self) {
+    /// Release the interactive widget in cell `i`, returning its effect (if any).
+    pub(crate) fn on_release(&mut self, i: usize, state: &State) -> Option<Action> {
+        match self.cells.get_mut(i).map(|c| &mut c.widget) {
+            Some(Widget::Button(b)) => b.on_release(state),
+            _ => None,
+        }
+    }
+    /// Anchor this layer's slider at the current touch, reading its initial level
+    /// from `State` via the backend.
+    pub(crate) fn grab_slider(&mut self, state: &State, x: f64) {
         for cell in &mut self.cells {
-            if cell.widget.is_battery() {
-                cell.widget.mark_changed();
+            if let Widget::Slider(sl) = &mut cell.widget {
+                let level = sl.backend.initial_level(state);
+                sl.grab(x, level);
+                return;
             }
         }
     }
-    /// Mutable access to the button in cell `i`, if that cell holds a real
-    /// button (used by the touch loop to toggle its active state).
-    pub(crate) fn button_mut(&mut self, i: usize) -> Option<&mut Button> {
-        match self.cells.get_mut(i).map(|c| &mut c.widget) {
-            Some(Widget::Button(b)) => Some(b),
-            _ => None,
+    /// Feed a drag sample to this layer's slider, returning the backend effect.
+    pub(crate) fn drag_slider(&mut self, x: f64, width: f64) -> Option<Action> {
+        for cell in &mut self.cells {
+            if let Widget::Slider(sl) = &mut cell.widget {
+                let level = sl.drag(x, width);
+                eprintln!("[dbg {:.6}] DRAG x={x:.0} level={level:.2}", dbg_ts());
+                return Some(sl.backend.apply(level));
+            }
         }
+        None
     }
-    /// The modal layer cell `i` opens on touch, if it holds a button with an
-    /// `open_layer` set.
-    pub(crate) fn open_layer(&self, i: usize) -> Option<String> {
-        match self.cells.get(i).map(|c| &c.widget) {
-            Some(Widget::Button(b)) => b.open_layer.clone(),
-            _ => None,
+    /// Release this layer's slider (end of a drag).
+    pub(crate) fn release_slider(&mut self) {
+        for cell in &mut self.cells {
+            if let Widget::Slider(sl) = &mut cell.widget {
+                sl.release();
+            }
         }
     }
     pub(crate) fn draw(
@@ -92,6 +120,7 @@ impl FunctionLayer {
         height: i32,
         surface: &Surface,
         pixel_shift: (f64, f64),
+        state: &State,
         complete_redraw: bool,
     ) -> Vec<ClipRect> {
         let c = Context::new(surface).unwrap();
@@ -124,7 +153,7 @@ impl FunctionLayer {
         for cell in &mut self.cells {
             let end = start + cell.stretch;
 
-            if !cell.widget.changed() && !complete_redraw {
+            if !cell.widget.changed(state) && !complete_redraw {
                 start = end;
                 continue;
             };
@@ -144,7 +173,7 @@ impl FunctionLayer {
                 height,
                 y_shift: pixel_shift_y,
             };
-            modified_regions.extend(cell.widget.draw(&c, config, &region, complete_redraw));
+            modified_regions.extend(cell.widget.draw(&c, config, &region, state, width, complete_redraw));
             start = end;
         }
 

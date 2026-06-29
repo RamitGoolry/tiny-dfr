@@ -1,73 +1,11 @@
-use crate::config::Config;
 use crate::function_layer::FunctionLayer;
-use crate::widgets::Slider;
-use cairo::Surface;
-use drm::control::ClipRect;
 use std::collections::HashMap;
 
-/// A single bar layer: either a row of buttons or a full-bar slider widget.
-/// The wrapping enum lets the event loop stay layer-kind agnostic.
-pub enum Layer {
-    Buttons(FunctionLayer),
-    Slider(Slider),
-}
-
-impl Layer {
-    pub fn faster_refresh(&self) -> bool {
-        match self {
-            Layer::Buttons(l) => l.faster_refresh(),
-            Layer::Slider(_) => false,
-        }
-    }
-    pub fn displays_time(&self) -> bool {
-        match self {
-            Layer::Buttons(l) => l.displays_time(),
-            Layer::Slider(_) => false,
-        }
-    }
-    pub fn displays_battery(&self) -> bool {
-        match self {
-            Layer::Buttons(l) => l.displays_battery(),
-            Layer::Slider(_) => false,
-        }
-    }
-    /// Whether anything in this layer changed since the last draw.
-    pub fn needs_redraw(&self) -> bool {
-        match self {
-            Layer::Buttons(l) => l.any_changed(),
-            Layer::Slider(s) => s.changed,
-        }
-    }
-    /// Battery state is polled, not event-driven, so force those buttons to redraw.
-    pub fn mark_batteries_changed(&mut self) {
-        match self {
-            Layer::Buttons(l) => l.mark_batteries_changed(),
-            Layer::Slider(_) => {}
-        }
-    }
-    pub fn draw(
-        &mut self,
-        config: &Config,
-        width: i32,
-        height: i32,
-        surface: &Surface,
-        pixel_shift: (f64, f64),
-        complete_redraw: bool,
-    ) -> Vec<ClipRect> {
-        match self {
-            Layer::Buttons(l) => {
-                l.draw(config, width, height, surface, pixel_shift, complete_redraw)
-            }
-            Layer::Slider(s) => {
-                s.draw(config, width, height, surface, pixel_shift, complete_redraw)
-            }
-        }
-    }
-}
-
 /// All layers keyed by name, plus the Fn-selected order of the two base layers.
+/// A layer is just a `FunctionLayer` (a row of cells); a modal slider is a
+/// one-cell `FunctionLayer`, so the event loop stays layer-kind agnostic.
 pub struct LayerStore {
-    pub registry: HashMap<String, Layer>,
+    pub registry: HashMap<String, FunctionLayer>,
     pub base_order: [String; 2],
 }
 
@@ -90,12 +28,12 @@ impl LayerStore {
         }
         self.base_order[st.fn_pressed as usize].clone()
     }
-    pub fn get(&self, name: &str) -> &Layer {
+    pub fn get(&self, name: &str) -> &FunctionLayer {
         self.registry
             .get(name)
             .expect("resolved layer must exist in the registry")
     }
-    pub fn get_mut(&mut self, name: &str) -> &mut Layer {
+    pub fn get_mut(&mut self, name: &str) -> &mut FunctionLayer {
         self.registry
             .get_mut(name)
             .expect("resolved layer must exist in the registry")

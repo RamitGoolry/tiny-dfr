@@ -3,38 +3,24 @@ use chrono::{
     format::{Item as ChronoItem, StrftimeItems},
     Local, Locale,
 };
-use drm::control::ClipRect;
 use librsvg_rebind::{prelude::HandleExt, Handle, Rectangle};
 
 use crate::battery::{get_battery_state, BatteryIconMode, BatteryImages, BatteryState};
-use crate::config::Config;
+use crate::state::State;
 use crate::widgets::button::try_load_image;
-use crate::widgets::Region;
+use crate::widgets::{IndicatorBackend, Region};
 use crate::DEFAULT_ICON_SIZE;
 
-/// What an indicator displays. Indicators are passive: they render content
-/// without chrome, an active highlight, or a hit region.
-enum IndicatorKind {
-    Clock {
-        format: Vec<ChronoItem<'static>>,
-        locale: Locale,
-    },
-    Battery {
-        device: String,
-        mode: BatteryIconMode,
-        images: BatteryImages,
-    },
+/// A passive clock readout. Renders white; the App drives its redraw via the
+/// minute/second boundary (see the main loop's `displays_time` complete-redraw),
+/// so `needs_redraw` stays false to avoid a redundant partial repaint.
+pub(crate) struct ClockIndicator {
+    format: Vec<ChronoItem<'static>>,
+    locale: Locale,
 }
 
-pub(crate) struct Indicator {
-    kind: IndicatorKind,
-    /// Whether the content changed since the last draw (clocks tick, batteries
-    /// are repolled), so the layer knows to repaint it.
-    pub(crate) changed: bool,
-}
-
-impl Indicator {
-    pub(crate) fn new_clock(format: &str, locale_str: Option<&str>) -> Indicator {
+impl ClockIndicator {
+    pub(crate) fn new(format: &str, locale_str: Option<&str>) -> ClockIndicator {
         let format_str = if format == "24hr" {
             "%H:%M    %a %-e %b"
         } else if format == "12hr" {
@@ -51,15 +37,56 @@ impl Indicator {
         let locale = locale_str
             .and_then(|l| Locale::try_from(l).ok())
             .unwrap_or(Locale::POSIX);
-        Indicator {
-            kind: IndicatorKind::Clock {
-                format: format_items,
-                locale,
-            },
-            changed: false,
+        ClockIndicator {
+            format: format_items,
+            locale,
         }
     }
+}
 
+impl IndicatorBackend for ClockIndicator {
+    fn draw_content(&self, c: &Context, r: &Region, _s: &State) {
+        c.set_source_rgb(1.0, 1.0, 1.0);
+        let current_time = Local::now();
+        let formatted_time = current_time
+            .format_localized_with_items(self.format.iter(), self.locale)
+            .to_string();
+        let time_extents = c.text_extents(&formatted_time).unwrap();
+        c.move_to(
+            r.left + (r.width / 2.0 - time_extents.width() / 2.0).round(),
+            r.y_shift + (r.height as f64 / 2.0 + time_extents.height() / 2.0).round(),
+        );
+        c.show_text(&formatted_time).unwrap();
+    }
+    fn needs_redraw(&self, _s: &State) -> bool {
+        false
+    }
+    fn is_clock(&self) -> bool {
+        true
+    }
+    fn needs_faster_refresh(&self) -> bool {
+        self.format.iter().any(|item| {
+            use chrono::format::{Item, Numeric};
+            matches!(
+                item,
+                Item::Numeric(Numeric::Second, _)
+                    | Item::Numeric(Numeric::Nanosecond, _)
+                    | Item::Numeric(Numeric::Timestamp, _)
+            )
+        })
+    }
+}
+
+/// A passive battery readout, tinted by charge state. Polled, not event-driven,
+/// so `needs_redraw` is always true: on a battery layer the cell repaints every
+/// loop iteration (the same cadence as today's per-iteration mark).
+pub(crate) struct BatteryIndicator {
+    device: String,
+    mode: BatteryIconMode,
+    images: BatteryImages,
+}
+
+impl BatteryIndicator {
     fn load_battery_image(icon: &str, theme: Option<impl AsRef<str>>) -> Handle {
         if let crate::widgets::button::ButtonImage::Svg(svg) =
             try_load_image(icon, theme, DEFAULT_ICON_SIZE, DEFAULT_ICON_SIZE).unwrap()
@@ -69,11 +96,11 @@ impl Indicator {
         panic!("failed to load icon");
     }
 
-    pub(crate) fn new_battery(
+    pub(crate) fn new(
         battery: String,
         battery_mode: String,
         theme: Option<impl AsRef<str>>,
-    ) -> Indicator {
+    ) -> BatteryIndicator {
         let bolt = Self::load_battery_image("bolt", theme.as_ref());
         let mut plain = Vec::new();
         let mut charging = Vec::new();
@@ -106,196 +133,103 @@ impl Indicator {
             "both" => BatteryIconMode::Both,
             _ => panic!("invalid battery mode, accepted modes: icon, percentage, both"),
         };
-        Indicator {
-            kind: IndicatorKind::Battery {
-                device: battery,
-                mode: battery_mode,
-                images: BatteryImages {
-                    plain,
-                    bolt,
-                    charging,
-                },
+        BatteryIndicator {
+            device: battery,
+            mode: battery_mode,
+            images: BatteryImages {
+                plain,
+                bolt,
+                charging,
             },
-            changed: false,
         }
     }
 
-    pub(crate) fn render(
-        &self,
-        c: &Context,
-        height: i32,
-        button_left_edge: f64,
-        button_width: u64,
-        y_shift: f64,
-    ) {
-        match &self.kind {
-            IndicatorKind::Clock { format, locale } => {
-                let current_time = Local::now();
-                let formatted_time = current_time
-                    .format_localized_with_items(format.iter(), *locale)
-                    .to_string();
-                let time_extents = c.text_extents(&formatted_time).unwrap();
-                c.move_to(
-                    button_left_edge
-                        + (button_width as f64 / 2.0 - time_extents.width() / 2.0).round(),
-                    y_shift + (height as f64 / 2.0 + time_extents.height() / 2.0).round(),
-                );
-                c.show_text(&formatted_time).unwrap();
-            }
-            IndicatorKind::Battery {
-                device: battery,
-                mode: battery_mode,
-                images: icons,
-            } => {
-                let (capacity, state) = get_battery_state(battery);
-                let icon = if battery_mode.should_draw_icon() {
-                    Some(match state {
-                        BatteryState::Charging => match capacity {
-                            0..=20 => &icons.charging[0],
-                            21..=30 => &icons.charging[1],
-                            31..=50 => &icons.charging[2],
-                            51..=60 => &icons.charging[3],
-                            61..=80 => &icons.charging[4],
-                            81..=99 => &icons.charging[5],
-                            _ => &icons.charging[6],
-                        },
-                        _ => match capacity {
-                            0 => &icons.plain[0],
-                            1..=20 => &icons.plain[1],
-                            21..=30 => &icons.plain[2],
-                            31..=50 => &icons.plain[3],
-                            51..=60 => &icons.plain[4],
-                            61..=80 => &icons.plain[5],
-                            81..=99 => &icons.plain[6],
-                            _ => &icons.plain[7],
-                        },
-                    })
-                } else if state == BatteryState::Charging {
-                    Some(&icons.bolt)
-                } else {
-                    None
-                };
-                let percent_str = format!("{:.0}%", capacity);
-                let extents = c.text_extents(&percent_str).unwrap();
-                let mut width = extents.width();
-                let mut text_offset = 0;
-                if let Some(svg) = icon {
-                    if !battery_mode.should_draw_text() {
-                        width = DEFAULT_ICON_SIZE as f64;
-                    } else {
-                        width += DEFAULT_ICON_SIZE as f64;
-                    }
-                    text_offset = DEFAULT_ICON_SIZE;
-                    let x = button_left_edge + (button_width as f64 / 2.0 - width / 2.0).round();
-                    let y = y_shift + ((height as f64 - DEFAULT_ICON_SIZE as f64) / 2.0).round();
-
-                    // librsvg ignores the cairo source colour, so render the
-                    // glyph to a stencil and paint the current source (the charge
-                    // colour, set in `draw`) through its alpha. Doing the SVG
-                    // render on a separate context also keeps it from resetting
-                    // `c`'s source, so the % text below stays tinted too.
-                    let stencil =
-                        ImageSurface::create(Format::ARgb32, DEFAULT_ICON_SIZE, DEFAULT_ICON_SIZE)
-                            .unwrap();
-                    svg.render_document(
-                        &Context::new(&stencil).unwrap(),
-                        &Rectangle::new(
-                            0.0,
-                            0.0,
-                            DEFAULT_ICON_SIZE as f64,
-                            DEFAULT_ICON_SIZE as f64,
-                        ),
-                    )
-                    .unwrap();
-                    c.mask_surface(&stencil, x, y).unwrap();
-                }
-                if battery_mode.should_draw_text() {
-                    c.move_to(
-                        button_left_edge
-                            + (button_width as f64 / 2.0 - width / 2.0 + text_offset as f64)
-                                .round(),
-                        y_shift + (height as f64 / 2.0 + extents.height() / 2.0).round(),
-                    );
-                    c.show_text(&percent_str).unwrap();
-                }
-            }
-        }
-    }
-
-    pub(crate) fn needs_faster_refresh(&self) -> bool {
-        match &self.kind {
-            IndicatorKind::Clock { format, .. } => format.iter().any(|item| {
-                use chrono::format::{Item, Numeric};
-                matches!(
-                    item,
-                    Item::Numeric(Numeric::Second, _)
-                        | Item::Numeric(Numeric::Nanosecond, _)
-                        | Item::Numeric(Numeric::Timestamp, _)
-                )
-            }),
-            _ => false,
-        }
-    }
-
-    pub(crate) fn is_clock(&self) -> bool {
-        matches!(self.kind, IndicatorKind::Clock { .. })
-    }
-
-    pub(crate) fn is_battery(&self) -> bool {
-        matches!(self.kind, IndicatorKind::Battery { .. })
-    }
-
-    /// Set the cairo source to this indicator's content colour. A battery tints
-    /// by charge state — green charging, red low, white otherwise — so the
-    /// readout still conveys charge state now that there's no coloured chrome
-    /// box behind it. Everything else renders white.
+    /// Set the cairo source to the charge-state colour — green charging, red low,
+    /// white otherwise — so the readout still conveys charge state now that there
+    /// is no coloured chrome box behind it.
     fn set_content_color(&self, c: &Context) {
-        match &self.kind {
-            IndicatorKind::Battery { device, .. } => match get_battery_state(device).1 {
-                BatteryState::Charging => c.set_source_rgb(0.25, 0.85, 0.35),
-                BatteryState::Low => c.set_source_rgb(0.95, 0.25, 0.25),
-                BatteryState::NotCharging => c.set_source_rgb(1.0, 1.0, 1.0),
-            },
-            IndicatorKind::Clock { .. } => c.set_source_rgb(1.0, 1.0, 1.0),
+        match get_battery_state(&self.device).1 {
+            BatteryState::Charging => c.set_source_rgb(0.25, 0.85, 0.35),
+            BatteryState::Low => c.set_source_rgb(0.95, 0.25, 0.25),
+            BatteryState::NotCharging => c.set_source_rgb(1.0, 1.0, 1.0),
         }
     }
+}
 
-    /// Render this indicator into its slot. Passive: no chrome box, no active
-    /// highlight, no background fill. On a partial redraw it clears the same cell
-    /// extent a `Button` would (so damage lines up), paints the content white,
-    /// and returns the matching `ClipRect`; on a complete redraw the layer has
-    /// already cleared and damaged the whole bar, so it returns no extra damage.
-    pub(crate) fn draw(
-        &mut self,
-        c: &Context,
-        _config: &Config,
-        region: &Region,
-        complete_redraw: bool,
-    ) -> Vec<ClipRect> {
-        let radius = 8.0f64;
-        let bot = (region.height as f64) * 0.15;
-        let top = (region.height as f64) * 0.85;
-        let left_edge = region.left;
-        let button_width = region.width;
-
-        if !complete_redraw {
-            c.set_source_rgb(0.0, 0.0, 0.0);
-            c.rectangle(left_edge, bot - radius, button_width, top - bot + radius * 2.0);
-            c.fill().unwrap();
-        }
+impl IndicatorBackend for BatteryIndicator {
+    fn draw_content(&self, c: &Context, r: &Region, _s: &State) {
         self.set_content_color(c);
-        self.render(c, region.height, left_edge, button_width.ceil() as u64, region.y_shift);
-        self.changed = false;
+        let height = r.height;
+        let button_left_edge = r.left;
+        let button_width = r.width.ceil() as u64;
+        let y_shift = r.y_shift;
 
-        if complete_redraw {
-            vec![]
+        let (capacity, state) = get_battery_state(&self.device);
+        let icons = &self.images;
+        let icon = if self.mode.should_draw_icon() {
+            Some(match state {
+                BatteryState::Charging => match capacity {
+                    0..=20 => &icons.charging[0],
+                    21..=30 => &icons.charging[1],
+                    31..=50 => &icons.charging[2],
+                    51..=60 => &icons.charging[3],
+                    61..=80 => &icons.charging[4],
+                    81..=99 => &icons.charging[5],
+                    _ => &icons.charging[6],
+                },
+                _ => match capacity {
+                    0 => &icons.plain[0],
+                    1..=20 => &icons.plain[1],
+                    21..=30 => &icons.plain[2],
+                    31..=50 => &icons.plain[3],
+                    51..=60 => &icons.plain[4],
+                    61..=80 => &icons.plain[5],
+                    81..=99 => &icons.plain[6],
+                    _ => &icons.plain[7],
+                },
+            })
+        } else if state == BatteryState::Charging {
+            Some(&icons.bolt)
         } else {
-            vec![ClipRect::new(
-                region.height as u16 - top as u16 - radius as u16,
-                left_edge as u16,
-                region.height as u16 - bot as u16 + radius as u16,
-                left_edge as u16 + button_width as u16,
-            )]
+            None
+        };
+        let percent_str = format!("{:.0}%", capacity);
+        let extents = c.text_extents(&percent_str).unwrap();
+        let mut width = extents.width();
+        let mut text_offset = 0;
+        if let Some(svg) = icon {
+            if !self.mode.should_draw_text() {
+                width = DEFAULT_ICON_SIZE as f64;
+            } else {
+                width += DEFAULT_ICON_SIZE as f64;
+            }
+            text_offset = DEFAULT_ICON_SIZE;
+            let x = button_left_edge + (button_width as f64 / 2.0 - width / 2.0).round();
+            let y = y_shift + ((height as f64 - DEFAULT_ICON_SIZE as f64) / 2.0).round();
+
+            // librsvg ignores the cairo source colour, so render the glyph to a
+            // stencil and paint the current source (the charge colour) through
+            // its alpha. Doing the SVG render on a separate context also keeps it
+            // from resetting `c`'s source, so the % text below stays tinted too.
+            let stencil =
+                ImageSurface::create(Format::ARgb32, DEFAULT_ICON_SIZE, DEFAULT_ICON_SIZE).unwrap();
+            svg.render_document(
+                &Context::new(&stencil).unwrap(),
+                &Rectangle::new(0.0, 0.0, DEFAULT_ICON_SIZE as f64, DEFAULT_ICON_SIZE as f64),
+            )
+            .unwrap();
+            c.mask_surface(&stencil, x, y).unwrap();
         }
+        if self.mode.should_draw_text() {
+            c.move_to(
+                button_left_edge
+                    + (button_width as f64 / 2.0 - width / 2.0 + text_offset as f64).round(),
+                y_shift + (height as f64 / 2.0 + extents.height() / 2.0).round(),
+            );
+            c.show_text(&percent_str).unwrap();
+        }
+    }
+    fn needs_redraw(&self, _s: &State) -> bool {
+        true
     }
 }

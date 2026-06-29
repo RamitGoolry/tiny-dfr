@@ -1,25 +1,34 @@
-use crate::config::Config;
-use cairo::{Context, Surface};
+use crate::action::Action;
+use crate::state::State;
+use crate::widgets::SliderBackend;
+use cairo::Context;
 use drm::control::ClipRect;
 use std::time::{Duration, Instant};
 
-/// Backend a slider drives. `Brightness` writes the display backlight directly
-/// via sysfs; a future `Volume` will go out over the control socket.
-pub enum SliderBackend {
-    Brightness,
+/// Brightness slider effect: pushes the level to the display backlight and reads
+/// its initial value back from the App-owned `State` on grab.
+pub(crate) struct BrightnessSlider;
+
+impl SliderBackend for BrightnessSlider {
+    fn apply(&self, level: f64) -> Action {
+        Action::SetBrightness(level)
+    }
+    fn initial_level(&self, s: &State) -> f64 {
+        s.brightness
+    }
 }
 
 /// A full-bar slider widget: tap-and-hold a trigger button to expand into it,
-/// drag to set, release to collapse. Holds display state only — the touch
+/// drag to set, release to collapse. Holds the shared drag UI only — the touch
 /// dispatch anchors the grab, feeds drag deltas in, and pushes the level to the
-/// backend.
-pub struct Slider {
-    pub backend: SliderBackend,
+/// backend (which decides the effect).
+pub(crate) struct Slider {
+    pub(crate) backend: Box<dyn SliderBackend>,
     /// Current level, 0.0..=1.0.
-    pub level: f64,
+    level: f64,
     /// (grab_x in device coords, grab_level) recorded on entry; None when idle.
     grab: Option<(f64, f64)>,
-    pub changed: bool,
+    pub(crate) changed: bool,
     /// Level at the last draw, so a partial redraw only damages the strip the
     /// fill edge moved across (full-panel damage is ~1s on appletbdrm; small ~1ms).
     drawn_level: f64,
@@ -29,7 +38,7 @@ pub struct Slider {
 }
 
 impl Slider {
-    pub fn new(backend: SliderBackend) -> Slider {
+    pub(crate) fn new(backend: Box<dyn SliderBackend>) -> Slider {
         Slider {
             backend,
             level: 0.0,
@@ -41,14 +50,14 @@ impl Slider {
     }
     /// Begin a drag: anchor at the current touch x and the current level so the
     /// fill tracks relative to where you grabbed (no jump to the finger).
-    pub fn grab(&mut self, x: f64, level: f64) {
+    pub(crate) fn grab(&mut self, x: f64, level: f64) {
         self.grab = Some((x, level));
         self.level = level;
         self.changed = true;
     }
     /// Update from the current touch x; returns the new level so the caller can
     /// push it to the backend. `width` is the bar's long-axis length.
-    pub fn drag(&mut self, x: f64, width: f64) -> f64 {
+    pub(crate) fn drag(&mut self, x: f64, width: f64) -> f64 {
         if let Some((gx, gl)) = self.grab {
             let new = (gl + (x - gx) / width).clamp(0.0, 1.0);
             if (new - self.level).abs() > f64::EPSILON {
@@ -62,21 +71,19 @@ impl Slider {
         }
         self.level
     }
-    pub fn release(&mut self) {
+    pub(crate) fn release(&mut self) {
         self.grab = None;
     }
-    pub fn draw(
+    /// Draw into the already-rotated layer context. `width`/`height` are the
+    /// bar's dimensions (the slider stretches the full bar, ignoring per-cell
+    /// geometry and pixel shift, as before).
+    pub(crate) fn draw(
         &mut self,
-        _config: &Config,
+        c: &Context,
         width: i32,
         height: i32,
-        surface: &Surface,
-        _pixel_shift: (f64, f64),
         complete_redraw: bool,
     ) -> Vec<ClipRect> {
-        let c = Context::new(surface).unwrap();
-        c.translate(height as f64, 0.0);
-        c.rotate((90.0f64).to_radians());
         let margin = 24.0;
         let track_w = width as f64 - 2.0 * margin;
         let track_h = height as f64 * 0.35;
