@@ -3,7 +3,7 @@ use drm::control::ClipRect;
 
 use crate::config::{ButtonConfig, Config};
 use crate::pixel_shift::PIXEL_SHIFT_WIDTH_PX;
-use crate::widget::{Button, ButtonImage};
+use crate::widgets::{Button, ButtonImage};
 use crate::{BUTTON_COLOR_ACTIVE, BUTTON_COLOR_INACTIVE, BUTTON_SPACING_PX};
 
 #[derive(Default)]

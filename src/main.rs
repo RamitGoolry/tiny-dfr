@@ -39,14 +39,15 @@ mod input;
 mod layer;
 mod pixel_shift;
 mod touch;
-mod widget;
+mod widgets;
 
 use crate::config::ConfigManager;
 use crate::input::Interface;
 use backlight::BacklightManager;
 use display::DrmBackend;
-use layer::{Layer, LayerStore, ResolverState, SliderBackend, TouchTarget};
+use layer::{Layer, LayerStore, ResolverState, TouchTarget};
 use pixel_shift::PixelShiftManager;
+use widgets::SliderBackend;
 use touch::{TouchPhase, TouchReader};
 
 const BUTTON_SPACING_PX: i32 = 16;
