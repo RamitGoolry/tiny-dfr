@@ -558,7 +558,12 @@ impl Button {
         if self.active != active {
             self.active = active;
             self.changed = true;
-            eprintln!("[dbg {:.6}] set_active={} key={:?}", dbg_ts(), active, self.action.first());
+            eprintln!(
+                "[dbg {:.6}] set_active={} key={:?}",
+                dbg_ts(),
+                active,
+                self.action.first()
+            );
             toggle_keys(uinput, &self.action, active as i32);
         }
     }
@@ -1098,29 +1103,22 @@ fn real_main(drm: &mut DrmBackend) {
         for event in &mut input_main.clone() {
             n_events += 1;
             backlight.process_event(&event);
-            match event {
-                Event::Keyboard(KeyboardEvent::Key(key)) => {
-                    if key.key() == Key::Fn as u32 {
-                        if cfg.double_press_switch_layers > 0
-                            && key.key_state() == KeyState::Pressed
+            if let Event::Keyboard(KeyboardEvent::Key(key)) = event {
+                if key.key() == Key::Fn as u32 {
+                    if cfg.double_press_switch_layers > 0 && key.key_state() == KeyState::Pressed {
+                        if last.elapsed()
+                            < Duration::from_millis(cfg.double_press_switch_layers.into())
                         {
-                            if last.elapsed()
-                                < Duration::from_millis(cfg.double_press_switch_layers.into())
-                            {
-                                store.base_order.swap(0, 1);
-                            }
-                            last = Instant::now();
+                            store.base_order.swap(0, 1);
                         }
-                        let fn_pressed = key.key_state() == KeyState::Pressed;
-                        if rstate.fn_pressed != fn_pressed {
-                            rstate.fn_pressed = fn_pressed;
-                            needs_complete_redraw = true;
-                        }
+                        last = Instant::now();
+                    }
+                    let fn_pressed = key.key_state() == KeyState::Pressed;
+                    if rstate.fn_pressed != fn_pressed {
+                        rstate.fn_pressed = fn_pressed;
+                        needs_complete_redraw = true;
                     }
                 }
-                // Touch comes from the raw digitizer reader (see touch.rs and the
-                // post-loop block below); libinput's events for it are ignored.
-                _ => {}
             }
         }
         let t_drain = t_in.elapsed();
