@@ -22,7 +22,6 @@ impl FunctionLayer {
         }
 
         let mut virtual_button_count = 0;
-        let displays_time = cfg.iter().any(|cfg| cfg.time.is_some());
         let displays_battery = cfg.iter().any(|cfg| cfg.battery.is_some());
         let buttons = cfg
             .into_iter()
@@ -37,6 +36,10 @@ impl FunctionLayer {
                 Some((i, Button::with_config(cfg)))
             })
             .collect::<Vec<_>>();
+        let displays_time = buttons.iter().any(|(_, b)| match &b.image {
+            ButtonImage::Indicator(ind) => ind.is_clock(),
+            _ => false,
+        });
         let faster_refresh = buttons.iter().any(|(_, b)| b.needs_faster_refresh());
         FunctionLayer {
             displays_time,
@@ -60,8 +63,10 @@ impl FunctionLayer {
     }
     pub(crate) fn mark_batteries_changed(&mut self) {
         for button in &mut self.buttons {
-            if let ButtonImage::Battery(_, _, _) = button.1.image {
-                button.1.changed = true;
+            if let ButtonImage::Indicator(ind) = &button.1.image {
+                if ind.is_battery() {
+                    button.1.changed = true;
+                }
             }
         }
     }

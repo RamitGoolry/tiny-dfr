@@ -3,6 +3,7 @@
 //! on_drag -> Action, draw) as the composable model lands. For now it just hosts
 //! and re-exports the widget types.
 pub(crate) mod button;
+pub(crate) mod indicator;
 pub(crate) mod slider;
 
 pub(crate) use button::{Button, ButtonImage};
