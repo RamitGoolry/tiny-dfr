@@ -85,7 +85,7 @@ pub struct Pattern {
 
 impl Pattern {
     pub fn new(st: &str) -> Pattern {
-        let cstr = CString::new(st).unwrap();
+        let cstr = CString::new(st).expect("font template contains an interior nul byte");
         let pattern = unsafe { FcNameParse(cstr.as_ptr()) };
         Pattern { pattern }
     }
@@ -95,7 +95,9 @@ impl Pattern {
             let mut file_name = ptr::null();
             let res = FcPatternGetString(self.pattern, name.as_ptr(), 0, &mut file_name);
             throw_on_fcpattern_result(res);
-            CStr::from_ptr(file_name).to_str().unwrap()
+            CStr::from_ptr(file_name)
+                .to_str()
+                .expect("font file path is not valid UTF-8")
         }
     }
     pub fn get_font_index(&self) -> isize {

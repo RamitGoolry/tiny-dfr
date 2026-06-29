@@ -72,7 +72,11 @@ fn find_display_backlight() -> Result<PathBuf> {
 }
 
 fn set_backlight(mut file: &File, value: u32) {
-    file.write_all(format!("{}\n", value).as_bytes()).unwrap();
+    // Runtime write: a transient failure (e.g. device asleep) shouldn't kill the
+    // daemon — log and let the next update retry.
+    if let Err(e) = file.write_all(format!("{}\n", value).as_bytes()) {
+        eprintln!("failed to set backlight to {value}: {e}");
+    }
 }
 
 pub struct BacklightManager {
@@ -102,7 +106,7 @@ impl BacklightManager {
             OpenOptions::new()
                 .write(true)
                 .open(p.join("brightness"))
-                .unwrap()
+                .expect("failed to open the Touch Bar backlight brightness file")
         });
         let (max_bl, current_bl) = match &bl_path {
             Some(p) => (read_attr(p, "max_brightness"), read_attr(p, "brightness")),
@@ -167,11 +171,13 @@ impl BacklightManager {
                 0
             } else if since_last_active < BRIGHTNESS_DIM_TIMEOUT as u64 {
                 if cfg.adaptive_brightness {
-                    let brightness = if let Some(path) = &self.display_bl_path {
-                        read_attr(path, "brightness")
-                    } else {
-                        self.max_bl / 2
-                    };
+                    // Runtime read: tolerate a transient failure by falling back to
+                    // the mid-point rather than panicking in the loop.
+                    let brightness = self
+                        .display_bl_path
+                        .as_ref()
+                        .and_then(|path| try_read_attr(path, "brightness"))
+                        .unwrap_or(self.max_bl / 2);
                     BacklightManager::display_to_touchbar(brightness, cfg.active_brightness)
                 } else {
                     cfg.active_brightness

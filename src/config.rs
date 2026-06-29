@@ -216,14 +216,20 @@ fn arm_inotify(inotify_fd: &Inotify) -> Option<WatchDescriptor> {
     let flags = AddWatchFlags::IN_MOVED_TO | AddWatchFlags::IN_CLOSE | AddWatchFlags::IN_ONESHOT;
     match inotify_fd.add_watch(USER_CFG_PATH, flags) {
         Ok(wd) => Some(wd),
+        // The config file not existing yet is normal — there's just nothing to
+        // watch. Any other error disables live reload rather than crashing.
         Err(Errno::ENOENT) => None,
-        e => Some(e.unwrap()),
+        Err(e) => {
+            eprintln!("failed to watch {USER_CFG_PATH}, live config reload disabled: {e}");
+            None
+        }
     }
 }
 
 impl ConfigManager {
     pub fn new() -> ConfigManager {
-        let inotify_fd = Inotify::init(InitFlags::IN_NONBLOCK).unwrap();
+        let inotify_fd = Inotify::init(InitFlags::IN_NONBLOCK)
+            .expect("failed to initialize inotify for config-file watching");
         let watch_desc = arm_inotify(&inotify_fd);
         ConfigManager {
             inotify_fd,

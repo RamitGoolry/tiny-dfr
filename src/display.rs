@@ -44,8 +44,13 @@ pub struct DrmBackend {
 
 impl Drop for DrmBackend {
     fn drop(&mut self) {
-        self.card.destroy_framebuffer(self.fb).unwrap();
-        self.card.destroy_dumb_buffer(self.db).unwrap();
+        // Never panic in Drop — a panic here during unwind would abort the process.
+        if let Err(e) = self.card.destroy_framebuffer(self.fb) {
+            eprintln!("failed to destroy framebuffer on shutdown: {e}");
+        }
+        if let Err(e) = self.card.destroy_dumb_buffer(self.db) {
+            eprintln!("failed to destroy dumb buffer on shutdown: {e}");
+        }
     }
 }
 

@@ -85,9 +85,13 @@ impl App {
         let volume = VolumeMixer::new();
 
         // uinput virtual-device setup — must stay AFTER the privilege drop.
-        uinput.set_evbit(EventKind::Key).unwrap();
+        uinput
+            .set_evbit(EventKind::Key)
+            .expect("failed to enable key events on the uinput device");
         for k in Key::iter() {
-            uinput.set_keybit(k).unwrap();
+            uinput
+                .set_keybit(k)
+                .expect("failed to register a key on the uinput device");
         }
         let mut dev_name_c = [0 as c_char; 80];
         let dev_name = "Dynamic Function Row Virtual Input Device".as_bytes();
@@ -105,11 +109,13 @@ impl App {
                 ff_effects_max: 0,
                 name: dev_name_c,
             })
-            .unwrap();
-        uinput.dev_create().unwrap();
+            .expect("failed to configure the uinput device");
+        uinput
+            .dev_create()
+            .expect("failed to create the uinput device");
 
-        let surface =
-            ImageSurface::create(Format::ARgb32, db_width as i32, db_height as i32).unwrap();
+        let surface = ImageSurface::create(Format::ARgb32, db_width as i32, db_height as i32)
+            .expect("failed to create the render surface");
         let rstate = ResolverState::default();
         let touches: HashMap<i32, TouchTarget> = HashMap::new();
         let last_redraw_ts = {
@@ -230,11 +236,18 @@ impl App {
                 self.needs_complete_redraw,
             );
             let t_draw = t_r.elapsed();
-            let data = self.surface.data().unwrap();
-            drm.map().unwrap().as_mut()[..data.len()].copy_from_slice(&data);
+            let data = self
+                .surface
+                .data()
+                .expect("failed to access the render surface pixels");
+            drm.map()
+                .expect("failed to map the DRM framebuffer for the frame copy")
+                .as_mut()[..data.len()]
+                .copy_from_slice(&data);
             // Partial (per-button) damage, as before; the probe times the push.
             let t_d = Instant::now();
-            drm.dirty(&clips).unwrap();
+            drm.dirty(&clips)
+                .expect("failed to flush the DRM framebuffer damage");
             let t_dirty = t_d.elapsed();
             eprintln!(
                 "[dbg {:.6}] REDRAW draw={}ms dirty={}ms clips={} complete={}",
