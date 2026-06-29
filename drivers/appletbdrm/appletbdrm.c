@@ -63,6 +63,14 @@
 #define APPLETBDRM_DRIFT_DRAIN_MS	200	/* drain when this far behind on acks */
 #define APPLETBDRM_DRAIN_TIMEOUT	50	/* ms; short — only mops already-queued acks */
 #define APPLETBDRM_DRAIN_MAX		8192	/* safety cap on one drain pass */
+/*
+ * The device emits a short "runt" (just the 16-byte response header, no msg or
+ * payload) before each real 40-byte UPDATE_COMPLETE ack. read_response skips up
+ * to this many runts to reach the real response, so the worker's primary read
+ * gets the ack directly (read=0) instead of tripping on the runt and paying the
+ * per-frame drain — that drain's empty-wait was capping the bar at ~15fps.
+ */
+#define APPLETBDRM_SHORT_SKIP_MAX	4
 
 #define drm_to_adev(_drm)		container_of(_drm, struct appletbdrm_device, drm)
 #define adev_to_udev(adev)		interface_to_usbdev(to_usb_interface((adev)->drm.dev))
@@ -215,6 +223,7 @@ static int appletbdrm_read_response(struct appletbdrm_device *adev,
 	struct drm_device *drm = &adev->drm;
 	int ret, actual_size;
 	bool readiness_signal_received = false;
+	unsigned int short_skips = 0;
 
 retry:
 	ret = usb_bulk_msg(udev, usb_rcvbulkpipe(udev, adev->in_ep),
@@ -240,6 +249,15 @@ retry:
 	}
 
 	if (actual_size != size) {
+		/*
+		 * Runt message (see APPLETBDRM_SHORT_SKIP_MAX): skip it and read again
+		 * for the full response, like the readiness signal above. Bounded, so a
+		 * genuinely-absent ack still times out rather than spinning here.
+		 */
+		if (short_skips < APPLETBDRM_SHORT_SKIP_MAX) {
+			short_skips++;
+			goto retry;
+		}
 		drm_err(drm, "Actual size (%d) doesn't match expected size (%zu)\n",
 			actual_size, size);
 		return -EBADMSG;
