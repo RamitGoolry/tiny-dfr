@@ -12,10 +12,8 @@ use librsvg_rebind::{prelude::HandleExt, Handle, Rectangle};
 
 use drm::control::ClipRect;
 
-use crate::battery::find_battery_device;
 use crate::config::{ButtonConfig, Config};
 use crate::input::toggle_keys;
-use crate::widgets::indicator::Indicator;
 use crate::widgets::Region;
 use crate::{dbg_ts, BUTTON_COLOR_ACTIVE, BUTTON_COLOR_INACTIVE, DEFAULT_ICON_SIZE};
 
@@ -23,8 +21,6 @@ pub(crate) enum ButtonImage {
     Text(String),
     Svg(Handle),
     Bitmap(ImageSurface),
-    Indicator(Indicator),
-    Spacer,
 }
 
 pub(crate) struct Button {
@@ -129,11 +125,15 @@ pub(crate) fn try_load_image(
 }
 
 impl Button {
-    pub(crate) fn with_config(cfg: ButtonConfig) -> Button {
+    /// Build an interactive button from its config. Only the text/icon cases
+    /// live here; the indicator/battery-N/A/spacer dispatch is decided one level
+    /// up in [`crate::widgets::Widget::from_config`].
+    pub(crate) fn from_config(cfg: ButtonConfig) -> Button {
         let open_layer = cfg.open_layer.clone();
         let mut button = if let Some(text) = cfg.text {
             Button::new_text(text, cfg.action)
-        } else if let Some(icon) = cfg.icon {
+        } else {
+            let icon = cfg.icon.expect("Button::from_config requires text or icon");
             Button::new_icon(
                 &icon,
                 cfg.theme,
@@ -141,51 +141,16 @@ impl Button {
                 cfg.icon_width.unwrap_or(DEFAULT_ICON_SIZE),
                 cfg.icon_height.unwrap_or(DEFAULT_ICON_SIZE),
             )
-        } else if let Some(time) = cfg.time {
-            Button::new_indicator(cfg.action, Indicator::new_clock(&time, cfg.locale.as_deref()))
-        } else if let Some(battery_mode) = cfg.battery {
-            if let Some(battery) = find_battery_device() {
-                Button::new_indicator(
-                    cfg.action,
-                    Indicator::new_battery(battery, battery_mode, cfg.theme),
-                )
-            } else {
-                Button::new_text("Battery N/A".to_string(), cfg.action)
-            }
-        } else {
-            Button::new_spacer()
         };
         button.open_layer = open_layer;
         button
     }
-    fn new_spacer() -> Button {
-        Button {
-            action: vec![],
-            active: false,
-            changed: false,
-            image: ButtonImage::Spacer,
-            icon_width: 0.0,
-            icon_height: 0.0,
-            open_layer: None,
-        }
-    }
-    fn new_text(text: String, action: Vec<Key>) -> Button {
+    pub(crate) fn new_text(text: String, action: Vec<Key>) -> Button {
         Button {
             action,
             active: false,
             changed: false,
             image: ButtonImage::Text(text),
-            icon_width: 0.0,
-            icon_height: 0.0,
-            open_layer: None,
-        }
-    }
-    fn new_indicator(action: Vec<Key>, ind: Indicator) -> Button {
-        Button {
-            action,
-            active: false,
-            changed: false,
-            image: ButtonImage::Indicator(ind),
             icon_width: 0.0,
             icon_height: 0.0,
             open_layer: None,
@@ -208,12 +173,6 @@ impl Button {
             active: false,
             changed: false,
             open_layer: None,
-        }
-    }
-    pub(crate) fn needs_faster_refresh(&self) -> bool {
-        match &self.image {
-            ButtonImage::Indicator(ind) => ind.needs_faster_refresh(),
-            _ => false,
         }
     }
     pub(crate) fn render(
@@ -249,10 +208,6 @@ impl Button {
                 c.rectangle(x, y, self.icon_width, self.icon_height);
                 c.fill().unwrap();
             }
-            ButtonImage::Indicator(ind) => {
-                ind.render(c, height, button_left_edge, button_width, y_shift)
-            }
-            ButtonImage::Spacer => (),
         }
     }
     pub(crate) fn set_active<F>(&mut self, uinput: &mut UInputHandle<F>, active: bool)
@@ -272,11 +227,7 @@ impl Button {
         }
     }
     pub(crate) fn set_background_color(&self, c: &Context, color: f64) {
-        if let ButtonImage::Indicator(ind) = &self.image {
-            ind.background_color(c, color)
-        } else {
-            c.set_source_rgb(color, color, color);
-        }
+        c.set_source_rgb(color, color, color);
     }
     /// Render this button into its slot: the rounded chrome box (active or
     /// outline coloured), then the content. Returns the damage rect on a partial
@@ -307,19 +258,17 @@ impl Button {
             c.rectangle(left_edge, bot - radius, button_width, top - bot + radius * 2.0);
             c.fill().unwrap();
         }
-        if !matches!(self.image, ButtonImage::Spacer) {
-            self.set_background_color(c, color);
-            // draw box with rounded corners
-            c.new_sub_path();
-            let left = left_edge + radius;
-            let right = (left_edge + button_width.ceil()) - radius;
-            c.arc(right, bot, radius, (-90.0f64).to_radians(), (0.0f64).to_radians());
-            c.arc(right, top, radius, (0.0f64).to_radians(), (90.0f64).to_radians());
-            c.arc(left, top, radius, (90.0f64).to_radians(), (180.0f64).to_radians());
-            c.arc(left, bot, radius, (180.0f64).to_radians(), (270.0f64).to_radians());
-            c.close_path();
-            c.fill().unwrap();
-        }
+        self.set_background_color(c, color);
+        // draw box with rounded corners
+        c.new_sub_path();
+        let left = left_edge + radius;
+        let right = (left_edge + button_width.ceil()) - radius;
+        c.arc(right, bot, radius, (-90.0f64).to_radians(), (0.0f64).to_radians());
+        c.arc(right, top, radius, (0.0f64).to_radians(), (90.0f64).to_radians());
+        c.arc(left, top, radius, (90.0f64).to_radians(), (180.0f64).to_radians());
+        c.arc(left, bot, radius, (180.0f64).to_radians(), (270.0f64).to_radians());
+        c.close_path();
+        c.fill().unwrap();
         c.set_source_rgb(1.0, 1.0, 1.0);
         self.render(c, region.height, left_edge, button_width.ceil() as u64, region.y_shift);
         self.changed = false;

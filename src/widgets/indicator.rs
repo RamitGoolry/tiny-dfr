@@ -3,13 +3,18 @@ use chrono::{
     format::{Item as ChronoItem, StrftimeItems},
     Local, Locale,
 };
+use drm::control::ClipRect;
 use librsvg_rebind::{prelude::HandleExt, Handle, Rectangle};
 
 use crate::battery::{get_battery_state, BatteryIconMode, BatteryImages, BatteryState};
+use crate::config::Config;
 use crate::widgets::button::try_load_image;
+use crate::widgets::Region;
 use crate::DEFAULT_ICON_SIZE;
 
-pub(crate) enum Indicator {
+/// What an indicator displays. Indicators are passive: they render content
+/// without chrome, an active highlight, or a hit region.
+enum IndicatorKind {
     Clock {
         format: Vec<ChronoItem<'static>>,
         locale: Locale,
@@ -19,6 +24,13 @@ pub(crate) enum Indicator {
         mode: BatteryIconMode,
         images: BatteryImages,
     },
+}
+
+pub(crate) struct Indicator {
+    kind: IndicatorKind,
+    /// Whether the content changed since the last draw (clocks tick, batteries
+    /// are repolled), so the layer knows to repaint it.
+    pub(crate) changed: bool,
 }
 
 impl Indicator {
@@ -39,9 +51,12 @@ impl Indicator {
         let locale = locale_str
             .and_then(|l| Locale::try_from(l).ok())
             .unwrap_or(Locale::POSIX);
-        Indicator::Clock {
-            format: format_items,
-            locale,
+        Indicator {
+            kind: IndicatorKind::Clock {
+                format: format_items,
+                locale,
+            },
+            changed: false,
         }
     }
 
@@ -91,14 +106,17 @@ impl Indicator {
             "both" => BatteryIconMode::Both,
             _ => panic!("invalid battery mode, accepted modes: icon, percentage, both"),
         };
-        Indicator::Battery {
-            device: battery,
-            mode: battery_mode,
-            images: BatteryImages {
-                plain,
-                bolt,
-                charging,
+        Indicator {
+            kind: IndicatorKind::Battery {
+                device: battery,
+                mode: battery_mode,
+                images: BatteryImages {
+                    plain,
+                    bolt,
+                    charging,
+                },
             },
+            changed: false,
         }
     }
 
@@ -110,8 +128,8 @@ impl Indicator {
         button_width: u64,
         y_shift: f64,
     ) {
-        match self {
-            Indicator::Clock { format, locale } => {
+        match &self.kind {
+            IndicatorKind::Clock { format, locale } => {
                 let current_time = Local::now();
                 let formatted_time = current_time
                     .format_localized_with_items(format.iter(), *locale)
@@ -124,7 +142,7 @@ impl Indicator {
                 );
                 c.show_text(&formatted_time).unwrap();
             }
-            Indicator::Battery {
+            IndicatorKind::Battery {
                 device: battery,
                 mode: battery_mode,
                 images: icons,
@@ -191,8 +209,8 @@ impl Indicator {
     }
 
     pub(crate) fn needs_faster_refresh(&self) -> bool {
-        match self {
-            Indicator::Clock { format, .. } => format.iter().any(|item| {
+        match &self.kind {
+            IndicatorKind::Clock { format, .. } => format.iter().any(|item| {
                 use chrono::format::{Item, Numeric};
                 matches!(
                     item,
@@ -205,24 +223,65 @@ impl Indicator {
         }
     }
 
-    pub(crate) fn background_color(&self, c: &Context, color: f64) {
-        if let Indicator::Battery { device, .. } = self {
-            let (_, state) = get_battery_state(device);
-            match state {
-                BatteryState::NotCharging => c.set_source_rgb(color, color, color),
-                BatteryState::Charging => c.set_source_rgb(0.0, color, 0.0),
-                BatteryState::Low => c.set_source_rgb(color, 0.0, 0.0),
-            }
-        } else {
-            c.set_source_rgb(color, color, color);
-        }
-    }
-
     pub(crate) fn is_clock(&self) -> bool {
-        matches!(self, Indicator::Clock { .. })
+        matches!(self.kind, IndicatorKind::Clock { .. })
     }
 
     pub(crate) fn is_battery(&self) -> bool {
-        matches!(self, Indicator::Battery { .. })
+        matches!(self.kind, IndicatorKind::Battery { .. })
+    }
+
+    /// Set the cairo source to this indicator's content colour. A battery tints
+    /// by charge state — green charging, red low, white otherwise — so the
+    /// readout still conveys charge state now that there's no coloured chrome
+    /// box behind it. Everything else renders white.
+    fn set_content_color(&self, c: &Context) {
+        match &self.kind {
+            IndicatorKind::Battery { device, .. } => match get_battery_state(device).1 {
+                BatteryState::Charging => c.set_source_rgb(0.25, 0.85, 0.35),
+                BatteryState::Low => c.set_source_rgb(0.95, 0.25, 0.25),
+                BatteryState::NotCharging => c.set_source_rgb(1.0, 1.0, 1.0),
+            },
+            IndicatorKind::Clock { .. } => c.set_source_rgb(1.0, 1.0, 1.0),
+        }
+    }
+
+    /// Render this indicator into its slot. Passive: no chrome box, no active
+    /// highlight, no background fill. On a partial redraw it clears the same cell
+    /// extent a `Button` would (so damage lines up), paints the content white,
+    /// and returns the matching `ClipRect`; on a complete redraw the layer has
+    /// already cleared and damaged the whole bar, so it returns no extra damage.
+    pub(crate) fn draw(
+        &mut self,
+        c: &Context,
+        _config: &Config,
+        region: &Region,
+        complete_redraw: bool,
+    ) -> Vec<ClipRect> {
+        let radius = 8.0f64;
+        let bot = (region.height as f64) * 0.15;
+        let top = (region.height as f64) * 0.85;
+        let left_edge = region.left;
+        let button_width = region.width;
+
+        if !complete_redraw {
+            c.set_source_rgb(0.0, 0.0, 0.0);
+            c.rectangle(left_edge, bot - radius, button_width, top - bot + radius * 2.0);
+            c.fill().unwrap();
+        }
+        self.set_content_color(c);
+        self.render(c, region.height, left_edge, button_width.ceil() as u64, region.y_shift);
+        self.changed = false;
+
+        if complete_redraw {
+            vec![]
+        } else {
+            vec![ClipRect::new(
+                region.height as u16 - top as u16 - radius as u16,
+                left_edge as u16,
+                region.height as u16 - bot as u16 + radius as u16,
+                left_edge as u16 + button_width as u16,
+            )]
+        }
     }
 }

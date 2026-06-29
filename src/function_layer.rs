@@ -3,14 +3,14 @@ use drm::control::ClipRect;
 
 use crate::config::{ButtonConfig, Config};
 use crate::pixel_shift::PIXEL_SHIFT_WIDTH_PX;
-use crate::widgets::{Button, ButtonImage, Region};
+use crate::widgets::{Button, Cell, Region, Widget};
 use crate::BUTTON_SPACING_PX;
 
 #[derive(Default)]
 pub struct FunctionLayer {
     displays_time: bool,
     displays_battery: bool,
-    pub(crate) buttons: Vec<(usize, Button)>,
+    pub(crate) cells: Vec<Cell>,
     virtual_button_count: usize,
     faster_refresh: bool,
 }
@@ -21,30 +21,31 @@ impl FunctionLayer {
             panic!("Invalid configuration, layer has 0 buttons");
         }
 
-        let mut virtual_button_count = 0;
+        // Keep the battery flag config-based so the "no battery device" fallback
+        // (a "Battery N/A" button) still reports as a battery layer, as before.
         let displays_battery = cfg.iter().any(|cfg| cfg.battery.is_some());
-        let buttons = cfg
+        let mut virtual_button_count = 0;
+        let cells = cfg
             .into_iter()
-            .scan(&mut virtual_button_count, |state, cfg| {
-                let i = **state;
+            .map(|cfg| {
                 let mut stretch = cfg.stretch.unwrap_or(1);
                 if stretch < 1 {
                     println!("Stretch value must be at least 1, setting to 1.");
                     stretch = 1;
                 }
-                **state += stretch;
-                Some((i, Button::with_config(cfg)))
+                virtual_button_count += stretch;
+                Cell {
+                    stretch,
+                    widget: Widget::from_config(cfg),
+                }
             })
             .collect::<Vec<_>>();
-        let displays_time = buttons.iter().any(|(_, b)| match &b.image {
-            ButtonImage::Indicator(ind) => ind.is_clock(),
-            _ => false,
-        });
-        let faster_refresh = buttons.iter().any(|(_, b)| b.needs_faster_refresh());
+        let displays_time = cells.iter().any(|c| c.widget.is_clock());
+        let faster_refresh = cells.iter().any(|c| c.widget.needs_faster_refresh());
         FunctionLayer {
             displays_time,
             displays_battery,
-            buttons,
+            cells,
             virtual_button_count,
             faster_refresh,
         }
@@ -59,15 +60,29 @@ impl FunctionLayer {
         self.displays_battery
     }
     pub(crate) fn any_changed(&self) -> bool {
-        self.buttons.iter().any(|b| b.1.changed)
+        self.cells.iter().any(|c| c.widget.changed())
     }
     pub(crate) fn mark_batteries_changed(&mut self) {
-        for button in &mut self.buttons {
-            if let ButtonImage::Indicator(ind) = &button.1.image {
-                if ind.is_battery() {
-                    button.1.changed = true;
-                }
+        for cell in &mut self.cells {
+            if cell.widget.is_battery() {
+                cell.widget.mark_changed();
             }
+        }
+    }
+    /// Mutable access to the button in cell `i`, if that cell holds a real
+    /// button (used by the touch loop to toggle its active state).
+    pub(crate) fn button_mut(&mut self, i: usize) -> Option<&mut Button> {
+        match self.cells.get_mut(i).map(|c| &mut c.widget) {
+            Some(Widget::Button(b)) => Some(b),
+            _ => None,
+        }
+    }
+    /// The modal layer cell `i` opens on touch, if it holds a button with an
+    /// `open_layer` set.
+    pub(crate) fn open_layer(&self, i: usize) -> Option<String> {
+        match self.cells.get(i).map(|c| &c.widget) {
+            Some(Widget::Button(b)) => b.open_layer.clone(),
+            _ => None,
         }
     }
     pub(crate) fn draw(
@@ -105,16 +120,12 @@ impl FunctionLayer {
         c.set_font_face(&config.font_face);
         c.set_font_size(32.0);
 
-        for i in 0..self.buttons.len() {
-            let end = if i + 1 < self.buttons.len() {
-                self.buttons[i + 1].0
-            } else {
-                self.virtual_button_count
-            };
-            let (start, button) = &mut self.buttons[i];
-            let start = *start;
+        let mut start = 0;
+        for cell in &mut self.cells {
+            let end = start + cell.stretch;
 
-            if !button.changed && !complete_redraw {
+            if !cell.widget.changed() && !complete_redraw {
+                start = end;
                 continue;
             };
 
@@ -133,7 +144,8 @@ impl FunctionLayer {
                 height,
                 y_shift: pixel_shift_y,
             };
-            modified_regions.extend(button.draw(&c, config, &region, complete_redraw));
+            modified_regions.extend(cell.widget.draw(&c, config, &region, complete_redraw));
+            start = end;
         }
 
         modified_regions
@@ -146,22 +158,23 @@ impl FunctionLayer {
 
         let i = i.unwrap_or_else(|| {
             let virtual_i = (x / (width as f64 / self.virtual_button_count as f64)) as usize;
-            self.buttons
+            // Find the cell whose virtual span contains `virtual_i`.
+            let mut acc = 0;
+            self.cells
                 .iter()
-                .position(|(start, _)| *start > virtual_i)
-                .unwrap_or(self.buttons.len())
-                - 1
+                .position(|cell| {
+                    acc += cell.stretch;
+                    acc > virtual_i
+                })
+                .unwrap_or(self.cells.len() - 1)
         });
-        if i >= self.buttons.len() {
+        if i >= self.cells.len() {
             return None;
         }
 
-        let start = self.buttons[i].0;
-        let end = if i + 1 < self.buttons.len() {
-            self.buttons[i + 1].0
-        } else {
-            self.virtual_button_count
-        };
+        // Cumulative virtual start of cell `i`.
+        let start: usize = self.cells[..i].iter().map(|c| c.stretch).sum();
+        let end = start + self.cells[i].stretch;
 
         let left_edge = (start as f64 * (virtual_button_width + BUTTON_SPACING_PX as f64)).floor();
 
@@ -174,6 +187,11 @@ impl FunctionLayer {
             || y < 0.1 * height as f64
             || y > 0.9 * height as f64
         {
+            return None;
+        }
+
+        // Indicators and spacers are passive: a touch on them is a miss.
+        if !self.cells[i].widget.interactive() {
             return None;
         }
 

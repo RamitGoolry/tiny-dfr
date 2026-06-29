@@ -107,7 +107,9 @@ fn end_touch<F: AsRawFd>(
     match removed {
         Some(TouchTarget::Button { layer, btn }) => {
             if let Layer::Buttons(fl) = store.get_mut(&layer) {
-                fl.buttons[btn].1.set_active(uinput, false);
+                if let Some(button) = fl.button_mut(btn) {
+                    button.set_active(uinput, false);
+                }
             }
         }
         Some(TouchTarget::Slider { layer }) => {
@@ -352,7 +354,7 @@ fn real_main(drm: &mut DrmBackend) {
                         eprintln!("[dbg {:.6}] DOWN x={x:.0} y={y:.0} hit={hit:?}", dbg_ts());
                         if let Some(btn) = hit {
                             let trigger = match store.get(&active) {
-                                Layer::Buttons(fl) => fl.buttons[btn].1.open_layer.clone(),
+                                Layer::Buttons(fl) => fl.open_layer(btn),
                                 Layer::Slider(_) => None,
                             };
                             if let Some(target) = trigger {
@@ -374,7 +376,9 @@ fn real_main(drm: &mut DrmBackend) {
                                     },
                                 );
                                 if let Layer::Buttons(fl) = store.get_mut(&active) {
-                                    fl.buttons[btn].1.set_active(&mut uinput, true);
+                                    if let Some(button) = fl.button_mut(btn) {
+                                        button.set_active(&mut uinput, true);
+                                    }
                                 }
                             }
                         }
@@ -390,7 +394,9 @@ fn real_main(drm: &mut DrmBackend) {
                                 Layer::Slider(_) => false,
                             };
                             if let Layer::Buttons(fl) = store.get_mut(&layer) {
-                                fl.buttons[btn].1.set_active(&mut uinput, hit);
+                                if let Some(button) = fl.button_mut(btn) {
+                                    button.set_active(&mut uinput, hit);
+                                }
                             }
                         }
                         Some(TouchTarget::Slider { layer }) => {
