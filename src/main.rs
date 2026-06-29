@@ -1,16 +1,6 @@
-use cairo::{Format, ImageSurface};
-use chrono::{Local, Timelike};
 use drm::control::ClipRect;
-use ::input::{
-    event::{
-        keyboard::{KeyState, KeyboardEvent, KeyboardEventTrait},
-        Event,
-    },
-    Libinput,
-};
-use input_linux::{uinput::UInputHandle, EventKind, Key};
-use input_linux_sys::{input_id, uinput_setup};
-use libc::c_char;
+use ::input::Libinput;
+use input_linux::uinput::UInputHandle;
 use nix::{
     errno::Errno,
     sys::{
@@ -20,16 +10,15 @@ use nix::{
 };
 use privdrop::PrivDrop;
 use std::{
-    cmp::min,
-    collections::HashMap,
     fs::OpenOptions,
-    os::fd::{AsFd, AsRawFd},
+    os::fd::AsFd,
     panic::{self, AssertUnwindSafe},
-    time::{Duration, Instant},
+    time::Instant,
 };
 use udev::MonitorBuilder;
 
 mod action;
+mod app;
 mod backlight;
 mod battery;
 mod config;
@@ -43,15 +32,12 @@ mod state;
 mod touch;
 mod widgets;
 
-use crate::action::{Action, Edge};
+use crate::app::App;
 use crate::config::ConfigManager;
-use crate::input::{toggle_keys, Interface};
-use crate::state::State;
+use crate::input::Interface;
 use backlight::BacklightManager;
 use display::DrmBackend;
-use layer::{LayerStore, ResolverState, TouchTarget};
-use pixel_shift::PixelShiftManager;
-use touch::{TouchPhase, TouchReader};
+use touch::TouchReader;
 
 const BUTTON_SPACING_PX: i32 = 16;
 const BUTTON_COLOR_INACTIVE: f64 = 0.200;
@@ -98,56 +84,17 @@ fn main() {
     sigset.wait().unwrap();
 }
 
-/// The single effectful site: turn an `Action` returned by a widget into a real
-/// effect (emit a key, set brightness, enter/leave a modal). `x` is the touch's
-/// long-axis position, used to anchor a slider grab on `OpenModal`.
-#[allow(clippy::too_many_arguments)]
-fn apply<F: AsRawFd>(
-    action: Option<Action>,
-    uinput: &mut UInputHandle<F>,
-    backlight: &mut BacklightManager,
-    rstate: &mut ResolverState,
-    store: &mut LayerStore,
-    touches: &mut HashMap<i32, TouchTarget>,
-    needs_complete_redraw: &mut bool,
-    x: f64,
-    state: &State,
-) {
-    let Some(action) = action else { return };
-    match action {
-        Action::Key(keys, edge) => {
-            toggle_keys(uinput, &keys, (edge == Edge::Press) as i32);
-        }
-        Action::SetBrightness(level) => {
-            backlight.set_display_level(level);
-        }
-        Action::OpenModal(target) => {
-            rstate.modal = Some(target.clone());
-            store.get_mut(&target).grab_slider(state, x);
-            touches.insert(0, TouchTarget::Slider { layer: target });
-            *needs_complete_redraw = true;
-        }
-        Action::CloseModal => {
-            if let Some(layer) = rstate.modal.take() {
-                store.get_mut(&layer).release_slider();
-            }
-            *needs_complete_redraw = true;
-        }
-    }
-}
 
 fn real_main(drm: &mut DrmBackend) {
     let (height, width) = drm.mode().size();
     let (db_width, db_height) = drm.fb_info().unwrap().size();
-    let mut uinput = UInputHandle::new(OpenOptions::new().write(true).open("/dev/uinput").unwrap());
-    let mut backlight = BacklightManager::new();
+    // Root resources: opened before the privilege drop so their fds survive as
+    // `nobody`. (drm is already open; uinput + the raw digitizer open here.)
+    let uinput = UInputHandle::new(OpenOptions::new().write(true).open("/dev/uinput").unwrap());
+    let backlight = BacklightManager::new();
     // The T1 digitizer is read raw (see touch.rs) — libinput mangles its drags.
-    // Opened here, before the privilege drop, so the fd survives as `nobody`.
     let mut touch_reader = TouchReader::open(width, height);
     let mut cfg_mgr = ConfigManager::new();
-    let (mut cfg, mut store) = cfg_mgr.load_config(width);
-    let mut pixel_shift = PixelShiftManager::new();
-    let mut last = Instant::now();
 
     // drop privileges to input and video group
     let groups = ["input", "video"];
@@ -158,11 +105,9 @@ fn real_main(drm: &mut DrmBackend) {
         .apply()
         .unwrap_or_else(|e| panic!("Failed to drop privileges: {}", e));
 
-    let mut surface =
-        ImageSurface::create(Format::ARgb32, db_width as i32, db_height as i32).unwrap();
-    let mut rstate = ResolverState::default();
-    let mut needs_complete_redraw = true;
-    let mut prev_active = String::new();
+    // App owns the bar state + dispatch; its constructor runs the uinput device
+    // setup, which must stay AFTER the privilege drop above.
+    let mut app = App::new(&cfg_mgr, width, db_width, db_height, uinput, backlight);
 
     let mut input_main = Libinput::new_with_udev(Interface);
     input_main.udev_assign_seat("seat0").unwrap();
@@ -187,118 +132,20 @@ fn real_main(drm: &mut DrmBackend) {
             .add(reader.as_fd(), EpollEvent::new(EpollFlags::EPOLLIN, 4))
             .unwrap();
     }
-    uinput.set_evbit(EventKind::Key).unwrap();
-    for k in Key::iter() {
-        uinput.set_keybit(k).unwrap();
-    }
-    let mut dev_name_c = [0 as c_char; 80];
-    let dev_name = "Dynamic Function Row Virtual Input Device".as_bytes();
-    for i in 0..dev_name.len() {
-        dev_name_c[i] = dev_name[i] as c_char;
-    }
-    uinput
-        .dev_setup(&uinput_setup {
-            id: input_id {
-                bustype: 0x19,
-                vendor: 0x1209,
-                product: 0x316E,
-                version: 1,
-            },
-            ff_effects_max: 0,
-            name: dev_name_c,
-        })
-        .unwrap();
-    uinput.dev_create().unwrap();
 
-    let mut touches: HashMap<i32, TouchTarget> = HashMap::new();
-    let mut last_redraw_ts = {
-        let active = store.resolve(&rstate);
-        if store.get(&active).faster_refresh() {
-            Local::now().second()
-        } else {
-            Local::now().minute()
-        }
-    };
     loop {
-        if cfg_mgr.update_config(&mut cfg, &mut store, width) {
-            rstate = ResolverState::default();
-            touches.clear();
-            needs_complete_redraw = true;
-        }
-        let active = store.resolve(&rstate);
-        if active != prev_active {
-            eprintln!("[dbg {:.6}] LAYER {} -> {}", dbg_ts(), prev_active, active);
-            prev_active = active.clone();
-        }
+        app.reload_config(&mut cfg_mgr, width);
+        app.resolve_and_log();
 
-        let now = Local::now();
-        let ms_left = ((60 - now.second()) * 1000) as i32;
-        let mut next_timeout_ms = min(ms_left, TIMEOUT_MS);
+        let touch_down = touch_reader.as_ref().is_some_and(|r| r.is_down());
+        let next_timeout_ms = app.next_timeout(touch_down);
 
-        if cfg.enable_pixel_shift {
-            let (pixel_shift_needs_redraw, pixel_shift_next_timeout_ms) = pixel_shift.update();
-            if pixel_shift_needs_redraw {
-                needs_complete_redraw = true;
-            }
-            next_timeout_ms = min(next_timeout_ms, pixel_shift_next_timeout_ms);
-        }
+        // The world the widgets render from, snapshotted once per iteration and
+        // threaded into both the draw and the touch dispatch.
+        let state = app.state();
 
-        // A touch awaiting release is on a timer, not an fd event — poll fast
-        // enough to catch it, else the loop sleeps up to TIMEOUT_MS and the
-        // release (and the key-up it sends) lags by seconds.
-        if touch_reader.as_ref().is_some_and(|r| r.is_down()) {
-            next_timeout_ms = min(next_timeout_ms, TOUCH_ACTIVE_POLL_MS);
-        }
-
-        // The world the widgets render from, rebuilt each iteration and threaded
-        // into both draw and the touch dispatch.
-        let state = State {
-            brightness: backlight.display_level(),
-        };
-
-        let current_ts = if store.get(&active).faster_refresh() {
-            Local::now().second()
-        } else {
-            Local::now().minute()
-        };
-        if store.get(&active).displays_time() && (current_ts != last_redraw_ts) {
-            needs_complete_redraw = true;
-            last_redraw_ts = current_ts;
-        }
-
-        if needs_complete_redraw || store.get(&active).needs_redraw(&state) {
-            let shift = if cfg.enable_pixel_shift {
-                pixel_shift.get()
-            } else {
-                (0.0, 0.0)
-            };
-            let t_r = Instant::now();
-            let clips = store.get_mut(&active).draw(
-                &cfg,
-                width as i32,
-                height as i32,
-                &surface,
-                shift,
-                &state,
-                needs_complete_redraw,
-            );
-            let t_draw = t_r.elapsed();
-            let data = surface.data().unwrap();
-            drm.map().unwrap().as_mut()[..data.len()].copy_from_slice(&data);
-            // Partial (per-button) damage, as before; the probe times the push.
-            let t_d = Instant::now();
-            drm.dirty(&clips).unwrap();
-            let t_dirty = t_d.elapsed();
-            eprintln!(
-                "[dbg {:.6}] REDRAW draw={}ms dirty={}ms clips={} complete={}",
-                dbg_ts(),
-                t_draw.as_millis(),
-                t_dirty.as_millis(),
-                clips.len(),
-                needs_complete_redraw
-            );
-            needs_complete_redraw = false;
-        }
+        app.tick();
+        app.render(drm, &state);
 
         match epoll.wait(
             &mut [EpollEvent::new(EpollFlags::EPOLLIN, 0)],
@@ -316,24 +163,7 @@ fn real_main(drm: &mut DrmBackend) {
         let mut n_events = 0u32;
         for event in &mut input_main.clone() {
             n_events += 1;
-            backlight.process_event(&event);
-            if let Event::Keyboard(KeyboardEvent::Key(key)) = event {
-                if key.key() == Key::Fn as u32 {
-                    if cfg.double_press_switch_layers > 0 && key.key_state() == KeyState::Pressed {
-                        if last.elapsed()
-                            < Duration::from_millis(cfg.double_press_switch_layers.into())
-                        {
-                            store.base_order.swap(0, 1);
-                        }
-                        last = Instant::now();
-                    }
-                    let fn_pressed = key.key_state() == KeyState::Pressed;
-                    if rstate.fn_pressed != fn_pressed {
-                        rstate.fn_pressed = fn_pressed;
-                        needs_complete_redraw = true;
-                    }
-                }
-            }
+            app.on_libinput(event);
         }
         let t_drain = t_in.elapsed();
         // Only log when the input path itself is slow, to catch the stall bursts.
@@ -356,109 +186,9 @@ fn real_main(drm: &mut DrmBackend) {
                 samples.push(up);
             }
             for s in samples {
-                backlight.wake(); // any digitizer touch keeps the bar lit
-                let (x, y) = (s.x, s.y);
-                match s.phase {
-                    TouchPhase::Down => {
-                        if backlight.current_bl() == 0 {
-                            continue; // bar is dark; the touch just woke it
-                        }
-                        let active = store.resolve(&rstate);
-                        let hit = store.get(&active).hit(width, height, x, y, None);
-                        eprintln!("[dbg {:.6}] DOWN x={x:.0} y={y:.0} hit={hit:?}", dbg_ts());
-                        if let Some(btn) = hit {
-                            let action = store.get_mut(&active).on_press(btn, &state);
-                            // A modal hand-off (OpenModal) records its own Slider
-                            // target inside `apply`; everything else is a button.
-                            if !matches!(action, Some(Action::OpenModal(_))) {
-                                touches.insert(
-                                    0,
-                                    TouchTarget::Button {
-                                        layer: active.clone(),
-                                        btn,
-                                    },
-                                );
-                            }
-                            apply(
-                                action,
-                                &mut uinput,
-                                &mut backlight,
-                                &mut rstate,
-                                &mut store,
-                                &mut touches,
-                                &mut needs_complete_redraw,
-                                x,
-                                &state,
-                            );
-                        }
-                    }
-                    TouchPhase::Motion => match touches.get(&0) {
-                        Some(TouchTarget::Button { layer, btn }) => {
-                            let (layer, btn) = (layer.clone(), *btn);
-                            let active = store.resolve(&rstate);
-                            // Follow the finger: re-pressing re-lights + re-emits,
-                            // leaving releases — both no-ops if already in that
-                            // state, so we just call the matching edge each move.
-                            let hit = store.get(&active).hit(width, height, x, y, Some(btn)).is_some();
-                            let action = if hit {
-                                store.get_mut(&layer).on_press(btn, &state)
-                            } else {
-                                store.get_mut(&layer).on_release(btn, &state)
-                            };
-                            apply(
-                                action,
-                                &mut uinput,
-                                &mut backlight,
-                                &mut rstate,
-                                &mut store,
-                                &mut touches,
-                                &mut needs_complete_redraw,
-                                x,
-                                &state,
-                            );
-                        }
-                        Some(TouchTarget::Slider { layer }) => {
-                            let layer = layer.clone();
-                            let action = store.get_mut(&layer).drag_slider(x, width as f64);
-                            apply(
-                                action,
-                                &mut uinput,
-                                &mut backlight,
-                                &mut rstate,
-                                &mut store,
-                                &mut touches,
-                                &mut needs_complete_redraw,
-                                x,
-                                &state,
-                            );
-                        }
-                        None => {}
-                    },
-                    TouchPhase::Up => {
-                        let removed = touches.remove(&0);
-                        eprintln!("[dbg {:.6}] UP removed={}", dbg_ts(), removed.is_some());
-                        let action = match removed {
-                            Some(TouchTarget::Button { layer, btn }) => {
-                                store.get_mut(&layer).on_release(btn, &state)
-                            }
-                            Some(TouchTarget::Slider { .. }) => Some(Action::CloseModal),
-                            None => None,
-                        };
-                        apply(
-                            action,
-                            &mut uinput,
-                            &mut backlight,
-                            &mut rstate,
-                            &mut store,
-                            &mut touches,
-                            &mut needs_complete_redraw,
-                            x,
-                            &state,
-                        );
-                    }
-                }
+                app.on_touch(s, width, height, &state);
             }
         }
-        backlight.update_backlight(&cfg);
+        app.update_backlight();
     }
 }
