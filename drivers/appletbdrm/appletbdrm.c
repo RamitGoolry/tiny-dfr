@@ -48,10 +48,12 @@
 
 #define APPLETBDRM_BULK_MSG_TIMEOUT	1000
 /*
- * The per-frame UPDATE_COMPLETE ack normally arrives at ~1s; give the off-path
- * worker read a wide margin so a near-miss doesn't time out and desync the pipe.
+ * Worker ack-read timeout. Acks normally arrive in well under ~100ms; when the
+ * device drops one entirely the worker blocks here, freezing the display, so keep
+ * it tight. The backlog drain (below) reconciles any drift from an early timeout,
+ * so we don't need the wide margin that used to mask dropped acks behind a 3s stall.
  */
-#define APPLETBDRM_ACK_TIMEOUT		3000
+#define APPLETBDRM_ACK_TIMEOUT		500
 /*
  * Cap the device update rate (~30fps). Firing frames back-to-back overruns the
  * device's request/response pipe; the stock driver was paced by the render loop.
@@ -168,6 +170,7 @@ struct appletbdrm_device {
 	size_t shadow_pitch;
 	struct appletbdrm_fb_request_response *response; /* worker-owned ack */
 	u64 flush_seq; /* per-frame counter for the flush instrumentation log */
+	unsigned int flush_fail_streak; /* consecutive failed flushes; drives retry backoff */
 };
 
 /*
@@ -504,6 +507,7 @@ static void appletbdrm_flush_work(struct work_struct *work)
 	u64 timestamp = ktime_get_ns();
 	u64 t_send, t_done, wall;
 	unsigned int width, height, y;
+	unsigned int delay = APPLETBDRM_FLUSH_INTERVAL_MS;
 	size_t frames_size, request_size;
 	const u8 *src;
 	u8 *dst;
@@ -619,18 +623,41 @@ static void appletbdrm_flush_work(struct work_struct *work)
 
 	kfree(request);
 
+	/*
+	 * The device intermittently wedges its display engine under sustained load:
+	 * the send completes but no UPDATE_COMPLETE ack arrives (read=-110) and the
+	 * half-finished frame is left on screen. Re-queue this rect on any send/read
+	 * error so the worker keeps re-flushing it until the device acks again —
+	 * otherwise, with no new damage to wake the worker, the bar stays frozen and
+	 * drifts out of sync with tiny-dfr's layer state until an unrelated touch
+	 * (a separate USB interface on the same device) happens to revive it.
+	 */
+	if (send_ret || read_ret) {
+		adev->flush_fail_streak++;
+		mutex_lock(&adev->damage_lock);
+		appletbdrm_damage_add(&adev->damage, &r);
+		mutex_unlock(&adev->damage_lock);
+	} else {
+		adev->flush_fail_streak = 0;
+	}
+
 out:
 	/*
-	 * Re-queue (paced) if more damage arrived while we were busy. atomic_update
-	 * queues with the same delay, so device updates stay >= the interval apart
-	 * however they are triggered.
+	 * Re-queue (paced) if more damage arrived while we were busy, or if we're
+	 * retrying a wedged device. atomic_update queues with the same base delay, so
+	 * device updates stay >= the interval apart however they are triggered; while
+	 * the device is wedged we back off (up to ~1s) so retries don't spin.
 	 */
 	mutex_lock(&adev->damage_lock);
 	more = !appletbdrm_damage_empty(&adev->damage);
 	mutex_unlock(&adev->damage_lock);
+	if (adev->flush_fail_streak)
+		delay = min_t(unsigned int,
+			      APPLETBDRM_FLUSH_INTERVAL_MS << min(adev->flush_fail_streak, 5u),
+			      1000);
 	if (more)
 		queue_delayed_work(system_long_wq, &adev->flush_work,
-				   msecs_to_jiffies(APPLETBDRM_FLUSH_INTERVAL_MS));
+				   msecs_to_jiffies(delay));
 
 	drm_dev_exit(idx);
 }

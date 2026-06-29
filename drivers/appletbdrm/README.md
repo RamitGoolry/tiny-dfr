@@ -58,19 +58,30 @@ The atomic update now only copies the damaged pixels into a driver-owned
 full-frame shadow buffer (BGR888), unions the dirty rect, and hands the slow USB
 send + `UPDATE_COMPLETE` ack to a workqueue. `DIRTYFB` returns in ~ms so
 tiny-dfr's loop never blocks → brightness/responsiveness stay smooth. The full
-ack is kept (no Patch-A desync). Three pieces, each learned the hard way:
+ack is kept (no Patch-A desync). Four pieces, each learned the hard way:
 
 1. **Pacing** (`delayed_work`, one coalesced frame per run, ~30 fps). The stock
    driver was paced by the render loop; firing frames back-to-back overruns the
    device's request/response pipe (`-110` send timeouts).
-2. **Wide ack timeout** (3 s in the worker) so a near-miss ack doesn't time out
-   and skip a response.
+2. **Tight ack timeout** (500 ms in the worker). When the device drops an ack the
+   worker blocks here, freezing the display — so keep it short. The drain and the
+   retry below reconcile any drift, so the wide margin isn't needed (it started at
+   3 s, which turned a single dropped ack into a multi-second freeze).
 3. **Ack-backlog drain** — the device occasionally emits a garbage short ack,
    leaving its real ack unread; the offset accumulates until the pipe chokes
    (garbage acks → `-110` send timeouts → frozen bar). After each frame, if we've
    fallen behind (`off`) or the read errored, drain the already-queued stale acks
    so the worker stays current. This is *not* Patch A: the load-bearing wait for
    each frame's own ack is untouched — we only mop up the stale tail behind it.
+4. **Retry on a wedged device** — under sustained load the device intermittently
+   wedges its display engine: the send completes but no ack ever arrives
+   (`send=0 read=-110`) and the half-finished frame is left on screen. The worker
+   re-queues the rect on any send/read error and keeps re-flushing (backing off
+   toward ~1 s) until the device acks again, instead of going idle after one
+   failure and leaving the bar frozen until an unrelated touch (a separate USB
+   interface on the same device) happens to revive it. The display engine recovers
+   on its own — the worker just has to keep trying so it doesn't desync from the
+   daemon's layer state.
 
 Diagnosis tooling: the `flush_log` module param
 (`/sys/module/appletbdrm/parameters/flush_log`, off by default) logs per-frame
