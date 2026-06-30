@@ -58,5 +58,6 @@ pub struct ResolverState {
 /// What an in-flight touch (keyed by libinput seat slot) is currently driving.
 pub enum TouchTarget {
     Button { layer: String, btn: usize },
+    Media { layer: String, btn: usize },
     Slider { layer: String },
 }

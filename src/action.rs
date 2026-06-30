@@ -27,6 +27,8 @@ pub(crate) enum Action {
     MediaPlayPause,
     /// Send the active MPRIS player to the next track.
     MediaNext,
+    /// Seek the active MPRIS player to an absolute position in microseconds.
+    MediaSeek(f64),
     /// Enter the named layer as a momentary modal (e.g. a slider).
     OpenModal(String),
     /// Leave the current modal layer.

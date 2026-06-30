@@ -17,6 +17,7 @@ pub(crate) mod key {
     pub(crate) const CONTEXT_FOCUS_CLASS: &str = "context.focus.class";
     pub(crate) const CONTEXT_FOCUS_TITLE: &str = "context.focus.title";
     pub(crate) const MEDIA_ACTIVE_PLAYER: &str = "media.active.player";
+    pub(crate) const MEDIA_ACTIVE_TRACK_ID: &str = "media.active.track_id";
     pub(crate) const MEDIA_ACTIVE_STATUS: &str = "media.active.status";
     pub(crate) const MEDIA_ACTIVE_TITLE: &str = "media.active.title";
     pub(crate) const MEDIA_ACTIVE_ART_URL: &str = "media.active.art_url";

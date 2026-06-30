@@ -18,6 +18,7 @@ enum MediaPress {
     Previous,
     PlayPause,
     Next,
+    Scrubber,
 }
 
 pub(crate) struct MediaWidget {
@@ -42,7 +43,14 @@ impl MediaWidget {
             || store.is_dirty(key::MEDIA_ACTIVE_STATUS).unwrap_or(false)
     }
 
-    pub(crate) fn on_press(&mut self, x: f64, region: &Region) -> Option<Action> {
+    pub(crate) fn on_press(&mut self, x: f64, region: &Region, store: &Store) -> Option<Action> {
+        if self.is_in_scrub_well(x, region, store) {
+            if let Some(seek) = self.seek_from_x(x, region, store) {
+                self.active = Some(MediaPress::Scrubber);
+                self.changed = true;
+                return Some(Action::MediaSeek(seek));
+            }
+        }
         let press = self.hit_control(x, region)?;
         self.active = Some(press);
         self.changed = true;
@@ -50,7 +58,17 @@ impl MediaWidget {
             MediaPress::Previous => Action::MediaPrevious,
             MediaPress::PlayPause => Action::MediaPlayPause,
             MediaPress::Next => Action::MediaNext,
+            MediaPress::Scrubber => unreachable!(),
         })
+    }
+
+    pub(crate) fn on_drag(&mut self, x: f64, region: &Region, store: &Store) -> Option<Action> {
+        if matches!(self.active, Some(MediaPress::Scrubber)) {
+            self.changed = true;
+            self.seek_from_x(x, region, store).map(Action::MediaSeek)
+        } else {
+            None
+        }
     }
 
     pub(crate) fn on_release(&mut self) -> Option<Action> {
@@ -94,6 +112,32 @@ impl MediaWidget {
             ),
         ];
         (art_size, (scrub_left, scrub_right), controls)
+    }
+
+    fn scrub_well_bounds(&self, region: &Region, store: &Store) -> Option<(f64, f64)> {
+        let (_, (left, right), _) = self.layout(region);
+        let length = store.number(key::MEDIA_ACTIVE_LENGTH).unwrap_or(0.0);
+        let pos = store.number(key::MEDIA_ACTIVE_POSITION).unwrap_or(0.0);
+        let label_w = time_label_width(pos, length);
+        let bar_left = left + label_w + 14.0;
+        (right > bar_left).then_some((bar_left, right))
+    }
+
+    fn is_in_scrub_well(&self, x: f64, region: &Region, store: &Store) -> bool {
+        self.scrub_well_bounds(region, store)
+            .is_some_and(|(left, right)| x >= left && x <= right)
+    }
+
+    fn seek_from_x(&self, x: f64, region: &Region, store: &Store) -> Option<f64> {
+        let length = store.number(key::MEDIA_ACTIVE_LENGTH).ok()?;
+        if length <= 0.0 {
+            return None;
+        }
+        let (left, right) = self.scrub_well_bounds(region, store)?;
+        // Absolute finger position maps directly to media position. Values outside
+        // the well clamp to the nearest edge.
+        let pct = ((x - left) / (right - left)).clamp(0.0, 1.0);
+        Some(length * pct)
     }
 
     pub(crate) fn draw(
@@ -183,12 +227,13 @@ impl MediaWidget {
         c.set_source_rgb(1.0, 1.0, 1.0);
         c.set_font_size(24.0);
         let ext = c.text_extents(&label)?;
-        let label_x = left;
+        let label_w = time_label_width(pos, length);
+        let label_x = left + (label_w - ext.width()).max(0.0);
         let label_y = region.y_shift + (region.height as f64 / 2.0 + ext.height() / 2.0).round();
         c.move_to(label_x, label_y);
         c.show_text(&label)?;
 
-        let bar_left = left + ext.width() + 14.0;
+        let bar_left = left + label_w + 14.0;
         let w = (right - bar_left).max(1.0);
         let radius = 8.0;
         let bot = region.height as f64 * 0.15;
@@ -320,6 +365,16 @@ fn draw_triangle(c: &Context, x: f64, y: f64, width: f64, height: f64) -> Result
     c.close_path();
     c.fill()?;
     Ok(())
+}
+
+fn time_label_width(position_us: f64, length_us: f64) -> f64 {
+    let position = (position_us / 1_000_000.0).max(0.0).round() as u64;
+    let length = (length_us / 1_000_000.0).max(0.0).round() as u64;
+    if position >= 3600 || length >= 3600 {
+        245.0
+    } else {
+        160.0
+    }
 }
 
 fn format_time_pair(position_us: f64, length_us: f64) -> String {

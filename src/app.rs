@@ -115,6 +115,9 @@ impl App {
             .set(key::MEDIA_ACTIVE_PLAYER, Value::Text(String::new()))
             .expect("built-in Store key must be valid");
         runtime
+            .set(key::MEDIA_ACTIVE_TRACK_ID, Value::Text(String::new()))
+            .expect("built-in Store key must be valid");
+        runtime
             .set(key::MEDIA_ACTIVE_STATUS, Value::Text(String::new()))
             .expect("built-in Store key must be valid");
         runtime
@@ -221,6 +224,8 @@ impl App {
     fn store_media(&mut self, media: MediaState) -> Result<()> {
         self.runtime
             .set(key::MEDIA_ACTIVE_PLAYER, Value::Text(media.player))?;
+        self.runtime
+            .set(key::MEDIA_ACTIVE_TRACK_ID, Value::Text(media.track_id))?;
         self.runtime
             .set(key::MEDIA_ACTIVE_STATUS, Value::Text(media.status))?;
         self.runtime
@@ -653,9 +658,17 @@ impl App {
                         self.store
                             .get_mut(&active)
                             .on_press_at(btn, &self.runtime, area, x);
-                    // A modal hand-off (OpenModal) records its own Slider
-                    // target inside `apply`; everything else is a button.
-                    if !matches!(action, Some(Action::OpenModal(_))) {
+                    // Modal and media scrub hand-offs record their own touch target;
+                    // everything else is a normal button press/release sequence.
+                    if matches!(action, Some(Action::MediaSeek(_))) {
+                        self.touches.insert(
+                            0,
+                            TouchTarget::Media {
+                                layer: active.clone(),
+                                btn,
+                            },
+                        );
+                    } else if !matches!(action, Some(Action::OpenModal(_))) {
                         self.touches.insert(
                             0,
                             TouchTarget::Button {
@@ -688,6 +701,17 @@ impl App {
                     };
                     self.apply(action, x)?;
                 }
+                Some(TouchTarget::Media { layer, btn }) => {
+                    let (layer, btn) = (layer.clone(), *btn);
+                    let area = self
+                        .area_for_layer(&layer)
+                        .ok_or_else(|| anyhow!("no area for active layer `{layer}`"))?;
+                    let action = self
+                        .store
+                        .get_mut(&layer)
+                        .on_drag_at(btn, &self.runtime, area, x);
+                    self.apply(action, x)?;
+                }
                 Some(TouchTarget::Slider { layer }) => {
                     let layer = layer.clone();
                     let action = self.store.get_mut(&layer).drag_slider(x, width as f64);
@@ -700,6 +724,14 @@ impl App {
                 eprintln!("[dbg {:.6}] UP removed={}", dbg_ts(), removed.is_some());
                 let action = match removed {
                     Some(TouchTarget::Button { layer, btn }) => {
+                        let area = self
+                            .area_for_layer(&layer)
+                            .ok_or_else(|| anyhow!("no area for active layer `{layer}`"))?;
+                        self.store
+                            .get_mut(&layer)
+                            .on_release_at(btn, &self.runtime, area)
+                    }
+                    Some(TouchTarget::Media { layer, btn }) => {
                         let area = self
                             .area_for_layer(&layer)
                             .ok_or_else(|| anyhow!("no area for active layer `{layer}`"))?;
@@ -756,6 +788,11 @@ impl App {
             Action::MediaNext => {
                 self.mpris.next()?;
                 self.refresh_media()?;
+            }
+            Action::MediaSeek(position_us) => {
+                self.mpris.seek(position_us)?;
+                self.runtime
+                    .set(key::MEDIA_ACTIVE_POSITION, Value::Number(position_us))?;
             }
             Action::OpenModal(target) => {
                 let slider_key = self.store.get(&target).slider_key()?;

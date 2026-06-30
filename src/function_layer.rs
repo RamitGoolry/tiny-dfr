@@ -97,10 +97,24 @@ impl FunctionLayer {
         let region = self.region_for(area, i)?;
         match self.cells.get_mut(i).map(|c| &mut c.widget) {
             Some(Widget::Button(b)) => b.on_press(store),
-            Some(Widget::Media(m)) => m.on_press(x, &region),
+            Some(Widget::Media(m)) => m.on_press(x, &region, store),
             _ => None,
         }
     }
+    pub(crate) fn on_drag_at(
+        &mut self,
+        i: usize,
+        store: &Store,
+        area: LayerArea,
+        x: f64,
+    ) -> Option<Action> {
+        let region = self.region_for(area, i)?;
+        match self.cells.get_mut(i).map(|c| &mut c.widget) {
+            Some(Widget::Media(m)) => m.on_drag(x, &region, store),
+            _ => None,
+        }
+    }
+
     /// Release the interactive widget in cell `i`, returning its effect (if any).
     pub(crate) fn on_release_at(
         &mut self,
