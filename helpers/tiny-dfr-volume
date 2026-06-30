@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# tiny-dfr volume bridge (user-session side).
+#
+# The Touch Bar daemon runs as `nobody` and can't reach the user's PipeWire
+# socket, so its volume slider exchanges two files under /run/tiny-dfr with this
+# helper, which runs in the session and speaks to PipeWire via wpctl:
+#
+#   volume.target  : slider -> file  ; we apply it    (wpctl set-volume)
+#   volume.current : we -> file       ; slider reads it (fill + grab anchor)
+#
+# This is what makes the Touch Bar slider hit the SAME sink the media keys and
+# the osd-monitor OSD use, so all three agree. Polls the target file (no
+# inotify-tools dependency) and publishes the live volume on every PipeWire change.
+set -uo pipefail
+
+SINK=@DEFAULT_AUDIO_SINK@
+DIR=/run/tiny-dfr
+TARGET=$DIR/volume.target
+CURRENT=$DIR/volume.current
+POLL=0.05   # target poll interval (s); ~20 Hz, latest value wins
+
+# Publish the live sink volume (0..1) for the slider's fill and grab anchor.
+publish_current() {
+  local raw v
+  raw=$(wpctl get-volume "$SINK" 2>/dev/null) || return   # "Volume: 0.52 [MUTED]"
+  v=$(awk '{ v=$2; print (v>1?1:v) }' <<<"$raw")
+  printf '%s\n' "$v" >"$CURRENT" 2>/dev/null || true
+}
+
+# Apply slider drags. Poll the target file and push the latest value to PipeWire
+# only when it changes; wpctl's own runtime naturally rate-limits a fast drag.
+apply_loop() {
+  local last="" v
+  while :; do
+    if [[ -r $TARGET ]]; then
+      v=$(<"$TARGET")
+      if [[ -n $v && $v != "$last" ]]; then
+        last=$v
+        wpctl set-volume -l 1.0 "$SINK" "$v" 2>/dev/null || true
+      fi
+    fi
+    sleep "$POLL"
+  done
+}
+
+# Keep volume.current fresh: seed it, then update on any sink/server change.
+publish_loop() {
+  publish_current
+  stdbuf -oL pactl subscribe 2>/dev/null | while read -r line; do
+    case $line in
+      *"change' on sink #"* | *"change' on server"*) publish_current ;;
+    esac
+  done
+}
+
+apply_loop &
+publish_loop &
+wait
