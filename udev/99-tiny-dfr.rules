@@ -1,0 +1,21 @@
+# tiny-dfr runs as a user-session service, so the logged-in user needs access to
+# the devices it opens. The Touch Bar DRM card (group `video`) and the backlights
+# already work for a user in `video`; the digitizer is already `root:input 660`.
+#
+# `uaccess` does NOT work for these: /dev/uinput isn't a seat device, and the
+# Touch Bar digitizer is on its own seat (so the compositor ignores it) with no
+# active session — neither gets a logind ACL. So we use the `input` group instead.
+# Add yourself and re-login:  sudo usermod -aG input "$USER"
+#
+# Install: sudo cp udev/99-tiny-dfr.rules /etc/udev/rules.d/
+#          sudo udevadm control --reload && sudo udevadm trigger --name-match=uinput
+
+# Make /dev/uinput readable/writable by the `input` group (it's root-only by default).
+KERNEL=="uinput", SUBSYSTEM=="misc", GROUP="input", MODE="0660", OPTIONS+="static_node=uinput"
+
+# Let the `video` group write display + keyboard backlight brightness. These are
+# sysfs attributes (no device node), so GROUP=/MODE= can't target them — chgrp+chmod
+# via RUN is the standard approach (same as the `light`/`brightnessctl` packages).
+# tiny-dfr writes them directly (the brightness + keyboard-illumination sliders).
+ACTION=="add", SUBSYSTEM=="backlight", RUN+="/usr/bin/chgrp video /sys/class/backlight/%k/brightness", RUN+="/usr/bin/chmod g+w /sys/class/backlight/%k/brightness"
+ACTION=="add", SUBSYSTEM=="leds", KERNEL=="*kbd_backlight", RUN+="/usr/bin/chgrp video /sys/class/leds/%k/brightness", RUN+="/usr/bin/chmod g+w /sys/class/leds/%k/brightness"

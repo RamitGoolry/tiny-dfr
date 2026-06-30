@@ -5,44 +5,57 @@ The most basic dynamic function row daemon possible
 ## Dependencies
 cairo, libinput, freetype, fontconfig, librsvg 2.59 or later, uinput enabled in kernel config
 
-## Volume bridge (optional, for the volume slider)
+## Running as a user-session service
 
-The volume slider drives **PipeWire** so it matches the same sink the media keys
-and any on-screen display use. The daemon itself can't do this: it runs as a
-system service and drops to `nobody`, which has no access to the user's
-per-session PipeWire socket. So volume goes through a small session-side helper.
+This fork runs tiny-dfr **in your graphical session** (not as a root system
+service). That lets it drive PipeWire volume directly (via `wpctl` — no helper)
+and read your compositor's focused-window events for app-aware layers, all in one
+process. The cost is that the daemon needs device access as your user:
 
-How it works:
+- **Touch Bar DRM card** already works if you're in the `video` group.
+- **Display + keyboard backlight** brightness are root-owned sysfs attributes; the
+  udev rule below `chmod`s them to the `video` group so the brightness and
+  keyboard-illumination sliders can write them.
+- **`/dev/uinput`** (key emission) and the **Touch Bar digitizer** need the
+  `input` group. (`uaccess` doesn't work — uinput isn't a seat device and the
+  digitizer sits on its own seat.) Install [`udev/99-tiny-dfr.rules`](udev/99-tiny-dfr.rules)
+  and join the group — `just setup-udev`, or by hand:
+  ```
+  sudo cp udev/99-tiny-dfr.rules /etc/udev/rules.d/
+  sudo udevadm control --reload && sudo udevadm trigger --name-match=uinput
+  sudo usermod -aG input "$USER"   # then log out/in (or reboot)
+  ```
+  Verify after re-login with `ls -l /dev/uinput` (`crw-rw---- root input`) and
+  `id` (shows `input`).
+- Volume needs `wpctl` (WirePlumber) on `PATH`.
 
-- The daemon writes the desired level to `/run/tiny-dfr/volume.target` and reads
-  the live level from `/run/tiny-dfr/volume.current` (created mode 0666 as root
-  before the privilege drop).
-- [`helpers/tiny-dfr-volume`](helpers/tiny-dfr-volume), running **in your
-  session**, applies the target with `wpctl set-volume` and republishes the live
-  volume on every change. It needs `wpctl` (WirePlumber) and `pactl` (PipeWire's
-  PulseAudio shim).
+Then disable any old **system** service and run it in your session — either the
+shipped user unit:
+```
+sudo systemctl disable --now tiny-dfr            # remove the old system service
+mkdir -p ~/.config/systemd/user
+cp share/systemd/tiny-dfr.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now tiny-dfr
+```
+or, more simply, straight from the compositor (inherits the session env, but no
+auto-restart): `exec-once = /usr/bin/tiny-dfr`.
 
-Setup (three pieces, all outside the daemon binary):
+## App-aware layers
 
-1. **Make `/run/tiny-dfr` writable.** The shipped unit uses `ProtectSystem=strict`,
-   so grant it a runtime dir via a drop-in:
-   ```
-   sudo install -d /etc/systemd/system/tiny-dfr.service.d
-   printf '[Service]\nRuntimeDirectory=tiny-dfr\n' \
-     | sudo tee /etc/systemd/system/tiny-dfr.service.d/runtime-dir.conf
-   sudo systemctl daemon-reload && sudo systemctl restart tiny-dfr
-   ```
-2. **Put the helper on `PATH`** (symlink so it tracks this repo):
-   ```
-   ln -sf "$PWD/helpers/tiny-dfr-volume" ~/.local/bin/tiny-dfr-volume
-   ```
-3. **Launch it in your session.** For example, with Hyprland:
-   ```
-   exec-once = ~/.local/bin/tiny-dfr-volume
-   ```
+Map a focused-window class to a layer with an `[AppLayers]` table in
+`/etc/tiny-dfr/config.toml` — when that app is focused, its layer takes precedence
+over the base layer:
 
-Without this helper the volume slider is inert (brightness and keyboard
-illumination work without it — they write sysfs directly).
+```toml
+[AppLayers]
+Spotify = "media"
+firefox = "media"
+```
+
+The class is the Hyprland `class` (see `hyprctl activewindow`). Values are layer
+names from the registry (today: `media`, `fkeys`). An unmapped app falls back to
+the base layer.
 
 ## License
 

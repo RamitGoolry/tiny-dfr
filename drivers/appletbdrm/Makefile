@@ -24,21 +24,22 @@ install: all
 # AND teaches appletbdrm the T1 id via `new_id` — and that new_id is lost on rmmod.
 # So: stop the daemon, swap the module, re-run the switch script (re-adds new_id +
 # binds; re-switches config if rmmod reverted it), wait for the device node, then
-# restart the daemon (whose BindsTo dependency is that node). Needs root.
+# restart the daemon (the user service). The module ops need root (sudo); the
+# service ops are `systemctl --user` (run this from inside your graphical session).
 hotswap: all
-	sudo systemctl stop tiny-dfr
+	systemctl --user stop tiny-dfr
 	if lsmod | grep -qw $(MOD); then sudo rmmod $(MOD); fi
 	sudo insmod $(PWD)/$(MOD).ko
 	sudo /usr/local/bin/touchbar-appletbdrm.sh
 	sudo udevadm settle --timeout=15
 	sudo sh -c 'for n in $$(seq 50); do [ -e /dev/tiny_dfr_display ] && break; sleep 0.1; done'
-	sudo systemctl start tiny-dfr
-	@echo ">> hotswapped $(MOD); card2=$$(ls /dev/dri/ | grep -c card2), follow: journalctl -u tiny-dfr -f -o cat"
+	systemctl --user start tiny-dfr
+	@echo ">> hotswapped $(MOD); card2=$$(ls /dev/dri/ | grep -c card2), follow: journalctl --user -u tiny-dfr -f -o cat"
 
 # Return to the stock in-tree module (unload this build, modprobe the original).
 revert:
-	sudo systemctl stop tiny-dfr
+	systemctl --user stop tiny-dfr
 	if lsmod | grep -qw $(MOD); then sudo rmmod $(MOD); fi
 	sudo modprobe $(MOD)
-	sudo systemctl start tiny-dfr
+	systemctl --user start tiny-dfr
 	@echo ">> reverted to stock $(MOD)"

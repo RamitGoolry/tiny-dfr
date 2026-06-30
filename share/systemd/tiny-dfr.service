@@ -1,0 +1,24 @@
+# tiny-dfr as a systemd **user** service (runs in your session, no root).
+# Install to ~/.config/systemd/user/tiny-dfr.service, then:
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now tiny-dfr
+#
+# It needs the Wayland/Hyprland session env (WAYLAND_DISPLAY,
+# HYPRLAND_INSTANCE_SIGNATURE, XDG_RUNTIME_DIR). Hyprland imports these into the
+# user manager via `systemctl --user import-environment …` (see hyprland.conf), so
+# start this after that has run — binding it to graphical-session.target does that.
+# Simpler alternative: skip this unit and launch directly from the compositor with
+#   exec-once = /usr/bin/tiny-dfr
+# which inherits the session env directly (but without auto-restart).
+[Unit]
+Description=tiny-dfr Touch Bar daemon
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+ExecStart=/usr/bin/tiny-dfr
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=graphical-session.target
