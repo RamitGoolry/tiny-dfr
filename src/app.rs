@@ -3,14 +3,12 @@
 //! privileges, builds an `App`, and then just feeds it I/O events from the epoll
 //! loop. Everything here is a verbatim lift of the old `real_main` loop bodies, with
 //! the moved locals turned into `self.` fields — behaviour is unchanged.
+use ::input::event::{
+    keyboard::{KeyState, KeyboardEvent, KeyboardEventTrait},
+    Event,
+};
 use cairo::{Format, ImageSurface};
 use chrono::{Local, Timelike};
-use ::input::{
-    event::{
-        keyboard::{KeyState, KeyboardEvent, KeyboardEventTrait},
-        Event,
-    },
-};
 use input_linux::{uinput::UInputHandle, EventKind, Key};
 use input_linux_sys::{input_id, uinput_setup};
 use libc::c_char;
@@ -23,22 +21,32 @@ use std::{
 
 use crate::action::{Action, Edge};
 use crate::backlight::BacklightManager;
-use crate::kbd_backlight::KbdBacklight;
-use crate::volume::VolumeMixer;
 use crate::config::{Config, ConfigManager};
 use crate::display::DrmBackend;
+use crate::event::AppEvent;
 use crate::input::toggle_keys;
+use crate::kbd_backlight::KbdBacklight;
 use crate::layer::{LayerStore, ResolverState, TouchTarget};
 use crate::pixel_shift::PixelShiftManager;
 use crate::state::State;
+use crate::store::{key, Store, Value};
 use crate::touch::{TouchPhase, TouchSample};
+use crate::volume::VolumeMixer;
 use crate::{dbg_ts, TIMEOUT_MS, TOUCH_ACTIVE_POLL_MS};
+
+pub(crate) struct AppGeometry {
+    pub(crate) width: u16,
+    pub(crate) height: u16,
+    pub(crate) db_width: u32,
+    pub(crate) db_height: u32,
+}
 
 /// Owns the application state, the render target, and the event dispatch. The I/O
 /// that drives it (drm, epoll, libinput, udev, the digitizer reader, the config
 /// manager) stays in `real_main`.
 pub(crate) struct App {
     store: LayerStore,
+    runtime: Store,
     rstate: ResolverState,
     touches: HashMap<i32, TouchTarget>,
     backlight: BacklightManager,
@@ -48,6 +56,8 @@ pub(crate) struct App {
     volume: VolumeMixer,
     uinput: UInputHandle<File>,
     cfg: Config,
+    width: u16,
+    height: u16,
     pixel_shift: PixelShiftManager,
     /// The render target the active layer draws into; copied into the drm fb.
     surface: ImageSurface,
@@ -66,9 +76,7 @@ impl App {
     /// involved (device access comes from group/udev rules — see the README).
     pub(crate) fn new(
         cfg_mgr: &ConfigManager,
-        width: u16,
-        db_width: u32,
-        db_height: u32,
+        geometry: AppGeometry,
         uinput: UInputHandle<File>,
         backlight: BacklightManager,
         kbd: KbdBacklight,
@@ -76,12 +84,29 @@ impl App {
         // Fatal at startup: an unloadable config means the daemon cannot run. This
         // runs under `real_main`'s catch_unwind, so the panic paints the crash bar.
         let (cfg, store) = cfg_mgr
-            .load_config(width)
+            .load_config(geometry.width)
             .unwrap_or_else(|e| panic!("failed to load configuration: {e:#}"));
         let pixel_shift = PixelShiftManager::new();
         let last = Instant::now();
         // In-process PipeWire volume via wpctl (see volume.rs); spawns its apply thread.
         let volume = VolumeMixer::new();
+        let mut runtime = Store::new();
+        runtime
+            .set(
+                key::HARDWARE_BRIGHTNESS,
+                Value::Number(backlight.display_level()),
+            )
+            .expect("built-in Store key must be valid");
+        runtime
+            .set(key::HARDWARE_KBD_ILLUM, Value::Number(kbd.level()))
+            .expect("built-in Store key must be valid");
+        runtime
+            .set(key::CONTEXT_FOCUS_CLASS, Value::Text(String::new()))
+            .expect("built-in Store key must be valid");
+        runtime
+            .set(key::CONTEXT_FOCUS_TITLE, Value::Text(String::new()))
+            .expect("built-in Store key must be valid");
+        runtime.clear_dirty();
 
         // uinput virtual-device setup.
         uinput
@@ -113,8 +138,12 @@ impl App {
             .dev_create()
             .expect("failed to create the uinput device");
 
-        let surface = ImageSurface::create(Format::ARgb32, db_width as i32, db_height as i32)
-            .expect("failed to create the render surface");
+        let surface = ImageSurface::create(
+            Format::ARgb32,
+            geometry.db_width as i32,
+            geometry.db_height as i32,
+        )
+        .expect("failed to create the render surface");
         let rstate = ResolverState::default();
         let touches: HashMap<i32, TouchTarget> = HashMap::new();
         let last_redraw_ts = {
@@ -127,6 +156,7 @@ impl App {
         };
         App {
             store,
+            runtime,
             rstate,
             touches,
             backlight,
@@ -134,6 +164,8 @@ impl App {
             volume,
             uinput,
             cfg,
+            width: geometry.width,
+            height: geometry.height,
             pixel_shift,
             surface,
             needs_complete_redraw: true,
@@ -144,17 +176,31 @@ impl App {
     }
 
     /// The world the widgets render from, snapshotted each iteration.
-    pub(crate) fn state(&self) -> State {
+    pub(crate) fn state(&mut self) -> State {
+        let brightness = self.backlight.display_level();
+        let kbd_illum = self.kbd.level();
+        self.runtime
+            .set(key::HARDWARE_BRIGHTNESS, Value::Number(brightness))
+            .expect("built-in Store key must be valid");
+        self.runtime
+            .set(key::HARDWARE_KBD_ILLUM, Value::Number(kbd_illum))
+            .expect("built-in Store key must be valid");
         State {
-            brightness: self.backlight.display_level(),
-            kbd_illum: self.kbd.level(),
+            brightness,
+            kbd_illum,
         }
     }
 
     /// A Hyprland focus change: map the focused window class to a layer (via
     /// `app_layers` config) and let it take precedence over the base layers. An
     /// unmapped class clears `app`, falling back to the base layer.
-    pub(crate) fn on_focus(&mut self, class: &str) {
+    pub(crate) fn on_focus(&mut self, class: &str, title: &str) {
+        self.runtime
+            .set(key::CONTEXT_FOCUS_CLASS, Value::Text(class.to_string()))
+            .expect("built-in Store key must be valid");
+        self.runtime
+            .set(key::CONTEXT_FOCUS_TITLE, Value::Text(title.to_string()))
+            .expect("built-in Store key must be valid");
         let new_app = self.cfg.app_layers.get(class).cloned();
         if new_app != self.rstate.app {
             eprintln!(
@@ -163,6 +209,18 @@ impl App {
             );
             self.rstate.app = new_app;
             self.needs_complete_redraw = true;
+        }
+    }
+
+    pub(crate) fn handle(&mut self, event: AppEvent, cfg_mgr: &mut ConfigManager) {
+        match event {
+            AppEvent::Libinput(event) => self.on_libinput(event),
+            AppEvent::Touch(sample) => self.on_touch(sample),
+            AppEvent::FocusChanged { class, title } => self.on_focus(&class, &title),
+            AppEvent::ConfigReload => {
+                self.reload_config(cfg_mgr, self.width);
+            }
+            AppEvent::Tick => self.tick(),
         }
     }
 
@@ -183,7 +241,12 @@ impl App {
     pub(crate) fn resolve_and_log(&mut self) {
         let active = self.store.resolve(&self.rstate);
         if active != self.prev_active {
-            eprintln!("[dbg {:.6}] LAYER {} -> {}", dbg_ts(), self.prev_active, active);
+            eprintln!(
+                "[dbg {:.6}] LAYER {} -> {}",
+                dbg_ts(),
+                self.prev_active,
+                active
+            );
             self.prev_active = active;
         }
     }
@@ -299,8 +362,10 @@ impl App {
 
     /// Dispatch one raw digitizer sample (Down/Motion/Up). `state` is the per-iteration
     /// snapshot, shared across every sample handled this iteration.
-    pub(crate) fn on_touch(&mut self, s: TouchSample, width: u16, height: u16, state: &State) {
+    pub(crate) fn on_touch(&mut self, s: TouchSample) {
         self.backlight.wake(); // any digitizer touch keeps the bar lit
+        let state = self.state();
+        let (width, height) = (self.width, self.height);
         let (x, y) = (s.x, s.y);
         match s.phase {
             TouchPhase::Down => {
@@ -311,7 +376,7 @@ impl App {
                 let hit = self.store.get(&active).hit(width, height, x, y, None);
                 eprintln!("[dbg {:.6}] DOWN x={x:.0} y={y:.0} hit={hit:?}", dbg_ts());
                 if let Some(btn) = hit {
-                    let action = self.store.get_mut(&active).on_press(btn, state);
+                    let action = self.store.get_mut(&active).on_press(btn, &state);
                     // A modal hand-off (OpenModal) records its own Slider
                     // target inside `apply`; everything else is a button.
                     if !matches!(action, Some(Action::OpenModal(_))) {
@@ -323,7 +388,7 @@ impl App {
                             },
                         );
                     }
-                    self.apply(action, x, state);
+                    self.apply(action, x, &state);
                 }
             }
             TouchPhase::Motion => match self.touches.get(&0) {
@@ -339,16 +404,16 @@ impl App {
                         .hit(width, height, x, y, Some(btn))
                         .is_some();
                     let action = if hit {
-                        self.store.get_mut(&layer).on_press(btn, state)
+                        self.store.get_mut(&layer).on_press(btn, &state)
                     } else {
-                        self.store.get_mut(&layer).on_release(btn, state)
+                        self.store.get_mut(&layer).on_release(btn, &state)
                     };
-                    self.apply(action, x, state);
+                    self.apply(action, x, &state);
                 }
                 Some(TouchTarget::Slider { layer }) => {
                     let layer = layer.clone();
                     let action = self.store.get_mut(&layer).drag_slider(x, width as f64);
-                    self.apply(action, x, state);
+                    self.apply(action, x, &state);
                 }
                 None => {}
             },
@@ -357,12 +422,12 @@ impl App {
                 eprintln!("[dbg {:.6}] UP removed={}", dbg_ts(), removed.is_some());
                 let action = match removed {
                     Some(TouchTarget::Button { layer, btn }) => {
-                        self.store.get_mut(&layer).on_release(btn, state)
+                        self.store.get_mut(&layer).on_release(btn, &state)
                     }
                     Some(TouchTarget::Slider { .. }) => Some(Action::CloseModal),
                     None => None,
                 };
-                self.apply(action, x, state);
+                self.apply(action, x, &state);
             }
         }
     }
@@ -394,7 +459,8 @@ impl App {
             Action::OpenModal(target) => {
                 self.rstate.modal = Some(target.clone());
                 self.store.get_mut(&target).grab_slider(state, x);
-                self.touches.insert(0, TouchTarget::Slider { layer: target });
+                self.touches
+                    .insert(0, TouchTarget::Slider { layer: target });
                 self.needs_complete_redraw = true;
             }
             Action::CloseModal => {

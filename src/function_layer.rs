@@ -173,14 +173,28 @@ impl FunctionLayer {
                 height,
                 y_shift: pixel_shift_y,
             };
-            modified_regions.extend(cell.widget.draw(&c, config, &region, state, width, complete_redraw));
+            modified_regions.extend(cell.widget.draw(
+                &c,
+                config,
+                &region,
+                state,
+                width,
+                complete_redraw,
+            ));
             start = end;
         }
 
         modified_regions
     }
 
-    pub(crate) fn hit(&self, width: u16, height: u16, x: f64, y: f64, i: Option<usize>) -> Option<usize> {
+    pub(crate) fn hit(
+        &self,
+        width: u16,
+        height: u16,
+        x: f64,
+        y: f64,
+        i: Option<usize>,
+    ) -> Option<usize> {
         let virtual_button_width =
             (width as i32 - (BUTTON_SPACING_PX * (self.virtual_button_count - 1) as i32)) as f64
                 / self.virtual_button_count as f64;

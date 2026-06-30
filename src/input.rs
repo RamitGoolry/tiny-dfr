@@ -44,7 +44,10 @@ where
             tv_usec: 0,
         },
     }]) {
-        eprintln!("failed to emit input event (type={}, code={code}, value={value}): {e}", ty as u16);
+        eprintln!(
+            "failed to emit input event (type={}, code={code}, value={value}): {e}",
+            ty as u16
+        );
     }
 }
 

@@ -49,9 +49,12 @@ impl KbdBacklight {
                 eprintln!("No keyboard backlight LED, illumination control disabled: {e}")
             })
             .ok();
-        let file = path
-            .as_ref()
-            .and_then(|p| OpenOptions::new().write(true).open(p.join("brightness")).ok());
+        let file = path.as_ref().and_then(|p| {
+            OpenOptions::new()
+                .write(true)
+                .open(p.join("brightness"))
+                .ok()
+        });
         let max = path
             .as_ref()
             .and_then(|p| try_read_attr(p, "max_brightness"))

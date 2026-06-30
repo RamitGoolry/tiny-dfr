@@ -1,5 +1,5 @@
-use drm::control::ClipRect;
 use ::input::Libinput;
+use drm::control::ClipRect;
 use input_linux::uinput::UInputHandle;
 use nix::{
     errno::Errno,
@@ -23,6 +23,7 @@ mod battery;
 mod config;
 mod context;
 mod display;
+mod event;
 mod fonts;
 mod function_layer;
 mod input;
@@ -30,13 +31,15 @@ mod kbd_backlight;
 mod layer;
 mod pixel_shift;
 mod state;
+mod store;
 mod touch;
 mod volume;
 mod widgets;
 
-use crate::app::App;
+use crate::app::{App, AppGeometry};
 use crate::config::ConfigManager;
 use crate::context::ContextListener;
+use crate::event::AppEvent;
 use crate::input::Interface;
 use crate::kbd_backlight::KbdBacklight;
 use backlight::BacklightManager;
@@ -67,7 +70,9 @@ fn main() {
     let (height, width) = drm.mode().size();
     let _ = panic::catch_unwind(AssertUnwindSafe(|| real_main(&mut drm)));
     let crash_bitmap = include_bytes!("crash_bitmap.raw");
-    let mut map = drm.map().expect("crash handler: failed to map the DRM framebuffer");
+    let mut map = drm
+        .map()
+        .expect("crash handler: failed to map the DRM framebuffer");
     let data = map.as_mut();
     let mut wptr = 0;
     for byte in crash_bitmap {
@@ -88,7 +93,6 @@ fn main() {
     sigset.add(Signal::SIGTERM);
     sigset.wait().expect("failed to wait on SIGTERM");
 }
-
 
 fn real_main(drm: &mut DrmBackend) {
     let (height, width) = drm.mode().size();
@@ -112,7 +116,18 @@ fn real_main(drm: &mut DrmBackend) {
     let mut cfg_mgr = ConfigManager::new();
 
     // App owns the bar state + dispatch.
-    let mut app = App::new(&cfg_mgr, width, db_width, db_height, uinput, backlight, kbd);
+    let mut app = App::new(
+        &cfg_mgr,
+        AppGeometry {
+            width,
+            height,
+            db_width,
+            db_height,
+        },
+        uinput,
+        backlight,
+        kbd,
+    );
 
     let mut input_main = Libinput::new_with_udev(Interface);
     input_main
@@ -148,7 +163,7 @@ fn real_main(drm: &mut DrmBackend) {
     }
 
     loop {
-        app.reload_config(&mut cfg_mgr, width);
+        app.handle(AppEvent::ConfigReload, &mut cfg_mgr);
         app.resolve_and_log();
 
         let touch_down = touch_reader.as_ref().is_some_and(|r| r.is_down());
@@ -158,7 +173,7 @@ fn real_main(drm: &mut DrmBackend) {
         // threaded into both the draw and the touch dispatch.
         let state = app.state();
 
-        app.tick();
+        app.handle(AppEvent::Tick, &mut cfg_mgr);
         app.render(drm, &state);
 
         match epoll.wait(
@@ -177,7 +192,7 @@ fn real_main(drm: &mut DrmBackend) {
         let mut n_events = 0u32;
         for event in &mut input_main.clone() {
             n_events += 1;
-            app.on_libinput(event);
+            app.handle(AppEvent::Libinput(event), &mut cfg_mgr);
         }
         let t_drain = t_in.elapsed();
         // Only log when the input path itself is slow, to catch the stall bursts.
@@ -200,13 +215,13 @@ fn real_main(drm: &mut DrmBackend) {
                 samples.push(up);
             }
             for s in samples {
-                app.on_touch(s, width, height, &state);
+                app.handle(AppEvent::Touch(s), &mut cfg_mgr);
             }
         }
 
         // ----- Hyprland focused-window context -> app-aware layer (context.rs).
-        if let Some(class) = context.poll() {
-            app.on_focus(&class);
+        if let Some((class, title)) = context.poll() {
+            app.handle(AppEvent::FocusChanged { class, title }, &mut cfg_mgr);
         }
         // Reconnect if Hyprland went away (e.g. compositor restart) and re-register.
         if !context.is_connected() && context.reconnect() {

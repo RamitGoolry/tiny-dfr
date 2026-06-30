@@ -28,8 +28,20 @@ const SLIDER_TRACK_RGB: (f64, f64, f64) = (0.20, 0.20, 0.22);
 fn rounded_rect(c: &Context, x: f64, y: f64, w: f64, h: f64, r: f64) {
     let r = r.min(w / 2.0).min(h / 2.0).max(0.0);
     c.new_sub_path();
-    c.arc(x + w - r, y + r, r, (-90f64).to_radians(), 0f64.to_radians());
-    c.arc(x + w - r, y + h - r, r, 0f64.to_radians(), 90f64.to_radians());
+    c.arc(
+        x + w - r,
+        y + r,
+        r,
+        (-90f64).to_radians(),
+        0f64.to_radians(),
+    );
+    c.arc(
+        x + w - r,
+        y + h - r,
+        r,
+        0f64.to_radians(),
+        90f64.to_radians(),
+    );
     c.arc(x + r, y + h - r, r, 90f64.to_radians(), 180f64.to_radians());
     c.arc(x + r, y + r, r, 180f64.to_radians(), 270f64.to_radians());
     c.close_path();

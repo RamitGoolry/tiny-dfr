@@ -76,7 +76,12 @@ pub(crate) trait IndicatorBackend {
 
         if !complete_redraw {
             c.set_source_rgb(0.0, 0.0, 0.0);
-            c.rectangle(left_edge, bot - radius, button_width, top - bot + radius * 2.0);
+            c.rectangle(
+                left_edge,
+                bot - radius,
+                button_width,
+                top - bot + radius * 2.0,
+            );
             c.fill().unwrap();
         }
         self.draw_content(c, region, state);
@@ -193,4 +198,3 @@ impl Widget {
         matches!(self, Widget::Indicator(i) if i.is_clock())
     }
 }
-

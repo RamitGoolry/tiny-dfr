@@ -325,7 +325,12 @@ impl Button {
         };
         if !complete_redraw {
             c.set_source_rgb(0.0, 0.0, 0.0);
-            c.rectangle(left_edge, bot - radius, button_width, top - bot + radius * 2.0);
+            c.rectangle(
+                left_edge,
+                bot - radius,
+                button_width,
+                top - bot + radius * 2.0,
+            );
             c.fill().unwrap();
         }
         self.set_background_color(c, color);
@@ -333,10 +338,34 @@ impl Button {
         c.new_sub_path();
         let left = left_edge + radius;
         let right = (left_edge + button_width.ceil()) - radius;
-        c.arc(right, bot, radius, (-90.0f64).to_radians(), (0.0f64).to_radians());
-        c.arc(right, top, radius, (0.0f64).to_radians(), (90.0f64).to_radians());
-        c.arc(left, top, radius, (90.0f64).to_radians(), (180.0f64).to_radians());
-        c.arc(left, bot, radius, (180.0f64).to_radians(), (270.0f64).to_radians());
+        c.arc(
+            right,
+            bot,
+            radius,
+            (-90.0f64).to_radians(),
+            (0.0f64).to_radians(),
+        );
+        c.arc(
+            right,
+            top,
+            radius,
+            (0.0f64).to_radians(),
+            (90.0f64).to_radians(),
+        );
+        c.arc(
+            left,
+            top,
+            radius,
+            (90.0f64).to_radians(),
+            (180.0f64).to_radians(),
+        );
+        c.arc(
+            left,
+            bot,
+            radius,
+            (180.0f64).to_radians(),
+            (270.0f64).to_radians(),
+        );
         c.close_path();
         c.fill().unwrap();
         c.set_source_rgb(1.0, 1.0, 1.0);
