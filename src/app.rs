@@ -80,8 +80,8 @@ impl App {
             .unwrap_or_else(|e| panic!("failed to load configuration: {e:#}"));
         let pixel_shift = PixelShiftManager::new();
         let last = Instant::now();
-        // The mixer opens /dev/snd/controlC0, reachable now that the daemon has
-        // dropped into the `audio` group (see real_main's PrivDrop group list).
+        // File-backed bridge to the user-session PipeWire helper (see volume.rs);
+        // the IPC files are created in real_main before the privilege drop.
         let volume = VolumeMixer::new();
 
         // uinput virtual-device setup — must stay AFTER the privilege drop.

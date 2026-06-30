@@ -1,98 +1,72 @@
-//! System volume control for the volume slider, via the ALSA hardware mixer.
-//! Unlike brightness/keyboard-illumination (sysfs files opened as root before the
-//! privilege drop), the mixer talks to `/dev/snd/controlC0`, which is reachable as
-//! `nobody` once the daemon joins the `audio` group (see the PrivDrop group list in
-//! `real_main`). The `Master` element is resolved fresh on every call rather than
-//! cached, because an `alsa::mixer::Selem` borrows its `Mixer` and would otherwise
-//! make this struct self-referential.
+//! PipeWire volume bridge (daemon side). The daemon runs as `nobody` and cannot
+//! reach the user's PipeWire socket, so the volume slider exchanges plain files
+//! under `/run/tiny-dfr` with a user-session helper (`tiny-dfr-volume`):
 //!
-//! Caveat: this drives the *hardware* `Master`. On systems where PipeWire/Pulse
-//! presents its own software volume, that may differ from what the user perceives
-//! as "system volume".
-use alsa::mixer::{Mixer, SelemChannelId, SelemId};
+//!   - `set_level` writes the desired 0.0..=1.0 level to `volume.target`; the
+//!     helper applies it with `wpctl set-volume`.
+//!   - `level()` reads the live level the helper publishes to `volume.current`
+//!     (so the fill and the grab anchor match what the OSD/keys show).
+//!
+//! `init_ipc` creates the files as root (before the privilege drop) and makes them
+//! world-writable, so `nobody` can write `target`/read `current` and the user's
+//! helper can read `target`/write `current`. The directory itself comes from the
+//! unit's `RuntimeDirectory=tiny-dfr` (writable even under `ProtectSystem=strict`).
+use std::fs;
+use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
 
-/// Candidate simple-control names, tried in order; the first one that exists and
-/// carries a playback volume wins. `Master` is the desktop norm, but Apple
-/// internal codecs (e.g. CS8409/CS42L83) expose only `PCM`, so it must be in the
-/// list for the slider to work on this hardware.
-const CANDIDATE_CONTROLS: &[&str] = &["Master", "PCM", "Speaker", "Headphone", "Digital"];
+const IPC_DIR: &str = "/run/tiny-dfr";
+const TARGET_PATH: &str = "/run/tiny-dfr/volume.target";
+const CURRENT_PATH: &str = "/run/tiny-dfr/volume.current";
 
-struct Inner {
-    mixer: Mixer,
-    selem_id: SelemId,
-    min: i64,
-    max: i64,
+/// Create the bridge files as root, before the privilege drop. Mode 0666 so both
+/// the dropped daemon and the user-session helper can read and write them. Best
+/// effort: on failure the volume slider simply does nothing until the bridge is up.
+pub fn init_ipc() {
+    // The directory is normally provided by `RuntimeDirectory=tiny-dfr`; create it
+    // too so a non-systemd launch still works where /run is writable.
+    if let Err(e) = fs::create_dir_all(IPC_DIR) {
+        eprintln!("volume bridge: cannot create {IPC_DIR} ({e}); volume slider disabled");
+        return;
+    }
+    for path in [TARGET_PATH, CURRENT_PATH] {
+        if !Path::new(path).exists() {
+            if let Err(e) = fs::write(path, "") {
+                eprintln!("volume bridge: cannot create {path}: {e}");
+                continue;
+            }
+        }
+        if let Err(e) = fs::set_permissions(path, fs::Permissions::from_mode(0o666)) {
+            eprintln!("volume bridge: cannot chmod {path}: {e}");
+        }
+    }
 }
 
-pub struct VolumeMixer {
-    inner: Option<Inner>,
-}
+/// File-backed handle to the volume bridge. Cheap to construct; the helper does
+/// the real PipeWire work.
+pub struct VolumeMixer;
 
 impl VolumeMixer {
     pub fn new() -> VolumeMixer {
-        VolumeMixer {
-            inner: Self::try_open(),
-        }
+        VolumeMixer
     }
 
-    fn try_open() -> Option<Inner> {
-        let mixer = Mixer::new("hw:0", false).ok()?;
-        for &name in CANDIDATE_CONTROLS {
-            let selem_id = SelemId::new(name, 0);
-            // The Selem borrows `mixer` only for this statement (it is a temporary
-            // dropped at the `;`), so `mixer` is free to move into `Inner` below.
-            let range = mixer
-                .find_selem(&selem_id)
-                .filter(|s| s.has_playback_volume())
-                .map(|s| s.get_playback_volume_range());
-            if let Some((min, max)) = range {
-                eprintln!("volume slider: using ALSA control '{name}'");
-                return Some(Inner {
-                    mixer,
-                    selem_id,
-                    min,
-                    max,
-                });
-            }
-        }
-        eprintln!("volume slider disabled: no playback-volume control found on hw:0");
-        None
-    }
-
-    /// Current Master volume in 0.0..=1.0, read fresh (after pumping mixer events
-    /// so external changes are reflected).
+    /// Current sink volume in 0.0..=1.0, as published by the helper. Falls back to
+    /// 0.0 when the file is missing or caught mid-write (transient — re-read next
+    /// frame).
     pub fn level(&self) -> f64 {
-        let Some(inner) = &self.inner else {
-            return 0.0;
-        };
-        let _ = inner.mixer.handle_events();
-        let Some(selem) = inner.mixer.find_selem(&inner.selem_id) else {
-            return 0.0;
-        };
-        let span = (inner.max - inner.min) as f64;
-        if span <= 0.0 {
-            return 0.0;
-        }
-        let vol = selem
-            .get_playback_volume(SelemChannelId::FrontLeft)
-            .unwrap_or(inner.min);
-        ((vol - inner.min) as f64 / span).clamp(0.0, 1.0)
+        fs::read_to_string(CURRENT_PATH)
+            .ok()
+            .and_then(|s| s.trim().parse::<f64>().ok())
+            .unwrap_or(0.0)
+            .clamp(0.0, 1.0)
     }
 
-    /// Set the Master volume from a 0.0..=1.0 level, unmuting if the element has a
-    /// playback switch (dragging the slider implies the user wants it audible).
+    /// Request a new sink volume by writing the target the helper applies.
     pub fn set_level(&self, level: f64) {
-        let Some(inner) = &self.inner else {
-            return;
-        };
-        let Some(selem) = inner.mixer.find_selem(&inner.selem_id) else {
-            return;
-        };
-        let span = (inner.max - inner.min) as f64;
-        let value = inner.min + (level.clamp(0.0, 1.0) * span).round() as i64;
-        let _ = selem.set_playback_volume_all(value);
-        if selem.has_playback_switch() {
-            let _ = selem.set_playback_switch_all(1);
+        let level = level.clamp(0.0, 1.0);
+        if let Err(e) = fs::write(TARGET_PATH, format!("{level:.4}\n")) {
+            eprintln!("volume bridge: failed to write target: {e}");
         }
     }
 }

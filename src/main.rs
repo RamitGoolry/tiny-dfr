@@ -106,13 +106,16 @@ fn real_main(drm: &mut DrmBackend) {
     let backlight = BacklightManager::new();
     // Keyboard backlight LED write fd, opened as root so it survives as `nobody`.
     let kbd = KbdBacklight::new();
+    // Volume bridge IPC files, created as root so `nobody` can use them after the
+    // drop; the user-session helper applies them to PipeWire. See volume.rs.
+    volume::init_ipc();
     // The T1 digitizer is read raw (see touch.rs) — libinput mangles its drags.
     let mut touch_reader = TouchReader::open(width, height);
     let mut cfg_mgr = ConfigManager::new();
 
-    // drop privileges to input, video, and audio groups (audio for the ALSA
-    // mixer the volume slider drives — see volume.rs).
-    let groups = ["input", "video", "audio"];
+    // drop privileges to the input and video groups. (Volume goes through the
+    // file bridge in volume.rs now, so no audio-group / ALSA access is needed.)
+    let groups = ["input", "video"];
 
     PrivDrop::default()
         .user("nobody")
