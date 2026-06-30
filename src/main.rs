@@ -33,6 +33,7 @@ mod layer;
 mod mpris;
 mod nvim_bridge;
 mod pixel_shift;
+mod remote;
 mod store;
 mod terminal;
 mod touch;
@@ -164,6 +165,11 @@ fn real_main(drm: &mut DrmBackend) {
             .add(fd, EpollEvent::new(EpollFlags::EPOLLIN, 5))
             .expect("failed to register the Hyprland context fd with epoll");
     }
+    if let Some(fd) = app.remote_wake_fd() {
+        epoll
+            .add(fd, EpollEvent::new(EpollFlags::EPOLLIN, 6))
+            .expect("failed to register the remote bridge wake fd with epoll");
+    }
 
     loop {
         handle_app_event(&mut app, AppEvent::ConfigReload, &mut cfg_mgr, drm);
@@ -189,6 +195,10 @@ fn real_main(drm: &mut DrmBackend) {
             Err(Errno::EINTR) | Ok(_) => 0,
             e => e.expect("epoll wait failed"),
         };
+
+        if app.drain_remote_wake() {
+            handle_app_event(&mut app, AppEvent::RemoteChanged, &mut cfg_mgr, drm);
+        }
 
         _ = udev_monitor.iter().last();
 

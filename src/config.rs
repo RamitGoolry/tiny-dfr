@@ -529,6 +529,59 @@ fn load_config(width: u16) -> Result<(Config, LayerStore)> {
         widget: Widget::DbuiConnections(DbuiConnectionsWidget::new()),
     }])
     .context("building the terminal-nvim-db-connections layer")?;
+    let terminal_pi_layer = FunctionLayer::from_cells(vec![
+        Cell {
+            stretch: 1,
+            widget: Widget::Button(Button::new(Box::new(KeyButton::new_text(
+                "Abort".to_string(),
+                vec![Key::Esc],
+                None,
+                None,
+                false,
+            )))),
+        },
+        Cell {
+            stretch: 1,
+            widget: Widget::Button(Button::new(Box::new(KeyButton::new_text(
+                "Model".to_string(),
+                vec![Key::LeftCtrl, Key::L],
+                None,
+                None,
+                false,
+            )))),
+        },
+        Cell {
+            stretch: 1,
+            widget: Widget::Button(Button::new(Box::new(KeyButton::new_text(
+                "Think".to_string(),
+                vec![Key::LeftShift, Key::Tab],
+                None,
+                None,
+                false,
+            )))),
+        },
+        Cell {
+            stretch: 1,
+            widget: Widget::Button(Button::new(Box::new(KeyButton::new_text(
+                "Tools".to_string(),
+                vec![Key::LeftCtrl, Key::O],
+                None,
+                None,
+                false,
+            )))),
+        },
+        Cell {
+            stretch: 1,
+            widget: Widget::Button(Button::new(Box::new(KeyButton::new_text(
+                "Thinking".to_string(),
+                vec![Key::LeftCtrl, Key::T],
+                None,
+                None,
+                false,
+            )))),
+        },
+    ])
+    .context("building the terminal-pi layer")?;
     let global_right_tabs_layer = FunctionLayer::with_config(vec![
         ButtonConfig {
             icon: None,
@@ -601,6 +654,7 @@ fn load_config(width: u16) -> Result<(Config, LayerStore)> {
         "terminal-nvim-db-connections".to_string(),
         terminal_nvim_db_connections_layer,
     );
+    registry.insert("terminal-pi".to_string(), terminal_pi_layer);
     registry.insert(
         "chromium-tabs-overlay".to_string(),
         chromium_tabs_overlay_layer,

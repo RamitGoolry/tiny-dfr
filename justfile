@@ -38,6 +38,14 @@ setup-udev:
     sudo usermod -aG input "$USER"
     @echo "added $USER to 'input' — log out/in (or reboot) to apply (backlight works now after a daemon restart)"
 
+# Install the remote SSH/tmux/nvim context helper on an SSH host.
+# Usage: just install-remote-helper optimus
+install-remote-helper host:
+    ssh {{host}} 'mkdir -p ~/.local/bin'
+    scp helpers/tiny-dfr-remote-helper {{host}}:.local/bin/tiny-dfr-remote-helper
+    ssh {{host}} 'chmod +x ~/.local/bin/tiny-dfr-remote-helper && ~/.local/bin/tiny-dfr-remote-helper --help >/dev/null'
+    @echo "installed tiny-dfr-remote-helper on {{host}}:~/.local/bin/tiny-dfr-remote-helper"
+
 # First-time (optional): install + enable the systemd user service.
 setup-service:
     mkdir -p ~/.config/systemd/user

@@ -66,6 +66,8 @@ pub(crate) struct TerminalState {
     pub(crate) app_pid: Option<u32>,
     pub(crate) nvim_pid: Option<u32>,
     pub(crate) tmux: Option<TmuxPaneState>,
+    pub(crate) ghostty_pid_window_count: usize,
+    pub(crate) ambiguous: bool,
 }
 
 pub(crate) struct TerminalContextClient;
@@ -73,6 +75,13 @@ pub(crate) struct TerminalContextClient;
 #[derive(Clone, Debug)]
 struct ActiveWindowInfo {
     class: String,
+    pid: u32,
+}
+
+#[derive(Clone, Debug)]
+struct HyprlandWindowInfo {
+    class: String,
+    initial_class: String,
     pid: u32,
 }
 
@@ -108,6 +117,19 @@ impl TerminalContextClient {
             };
         };
 
+        let ghostty_pid_window_count = ghostty_windows_for_pid(root_pid).unwrap_or(1);
+        if ghostty_pid_window_count > 1 {
+            return TerminalState {
+                available: true,
+                terminal: "ghostty".to_string(),
+                kind: TerminalKind::Unknown,
+                root_pid: Some(root_pid),
+                ghostty_pid_window_count,
+                ambiguous: true,
+                ..TerminalState::default()
+            };
+        }
+
         let procs = read_process_table();
         let descendants = descendants_of(root_pid, &procs);
 
@@ -136,6 +158,8 @@ impl TerminalContextClient {
                 app_pid,
                 nvim_pid,
                 tmux: Some(tmux),
+                ghostty_pid_window_count,
+                ambiguous: false,
             };
         }
 
@@ -163,6 +187,8 @@ impl TerminalContextClient {
                 .filter(|proc| classify_command(&proc.comm) == TerminalApp::Nvim)
                 .map(|proc| proc.pid),
             tmux: None,
+            ghostty_pid_window_count,
+            ambiguous: false,
         }
     }
 }
@@ -186,6 +212,53 @@ fn active_window_info() -> Option<ActiveWindowInfo> {
         .as_u64()
         .and_then(|pid| u32::try_from(pid).ok())?;
     Some(ActiveWindowInfo { class, pid })
+}
+
+fn hyprland_windows() -> Option<Vec<HyprlandWindowInfo>> {
+    let output = Command::new("hyprctl")
+        .args(["clients", "-j"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let values: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).ok()?;
+    Some(
+        values
+            .into_iter()
+            .filter_map(|value| {
+                let pid = value
+                    .get("pid")?
+                    .as_u64()
+                    .and_then(|pid| u32::try_from(pid).ok())?;
+                Some(HyprlandWindowInfo {
+                    class: value
+                        .get("class")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    initial_class: value
+                        .get("initialClass")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    pid,
+                })
+            })
+            .collect(),
+    )
+}
+
+fn ghostty_windows_for_pid(pid: u32) -> Option<usize> {
+    Some(
+        hyprland_windows()?
+            .into_iter()
+            .filter(|window| window.pid == pid)
+            .filter(|window| {
+                is_ghostty_class(&window.class) || is_ghostty_class(&window.initial_class)
+            })
+            .count(),
+    )
 }
 
 fn read_process_table() -> HashMap<u32, ProcInfo> {

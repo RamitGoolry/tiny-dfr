@@ -31,6 +31,7 @@ use crate::layer::{LayerStore, ResolverState, TouchTarget};
 use crate::mpris::{MediaState, MprisClient};
 use crate::nvim_bridge::{NvimBridgeClient, NvimBridgeSnapshot};
 use crate::pixel_shift::PixelShiftManager;
+use crate::remote::RemoteClient;
 use crate::store::{key, StateKey, Store, Value};
 use crate::terminal::{TerminalApp, TerminalContextClient, TerminalState};
 use crate::touch::{TouchPhase, TouchSample};
@@ -49,6 +50,7 @@ const TERMINAL_NVIM_DEBUG_LAYER: &str = "terminal-nvim-debug";
 const TERMINAL_NVIM_TEST_LAYER: &str = "terminal-nvim-test";
 const TERMINAL_NVIM_DB_LAYER: &str = "terminal-nvim-db";
 const TERMINAL_NVIM_DB_CONNECTIONS_LAYER: &str = "terminal-nvim-db-connections";
+const TERMINAL_PI_LAYER: &str = "terminal-pi";
 
 pub(crate) struct AppGeometry {
     pub(crate) width: u16,
@@ -73,6 +75,7 @@ pub(crate) struct App {
     mpris: MprisClient,
     chromium: ChromiumClient,
     terminal: TerminalContextClient,
+    remote: RemoteClient,
     nvim: NvimBridgeClient,
     uinput: UInputHandle<File>,
     cfg: Config,
@@ -169,6 +172,7 @@ impl App {
         let mpris = MprisClient::new();
         let chromium = ChromiumClient::new(None);
         let terminal = TerminalContextClient::new();
+        let remote = RemoteClient::new();
         let nvim = NvimBridgeClient::new();
         let mut runtime = Store::new();
         runtime
@@ -349,6 +353,7 @@ impl App {
             mpris,
             chromium,
             terminal,
+            remote,
             nvim,
             uinput,
             cfg,
@@ -377,7 +382,11 @@ impl App {
         self.refresh_media()?;
         self.refresh_chromium_tabs(false)?;
         self.refresh_terminal()?;
+        let remote_changed = self.refresh_remote();
         self.refresh_nvim_bridge()?;
+        if remote_changed {
+            self.needs_complete_redraw = true;
+        }
         if old_center.as_deref() != self.center_layer() || old_right != self.global_right_layer() {
             self.needs_complete_redraw = true;
         }
@@ -471,9 +480,33 @@ impl App {
         self.store_terminal(state)
     }
 
+    pub(crate) fn remote_wake_fd(&self) -> Option<std::os::fd::BorrowedFd<'_>> {
+        self.remote.wake_fd()
+    }
+
+    pub(crate) fn drain_remote_wake(&mut self) -> bool {
+        self.remote.drain_wake()
+    }
+
+    fn refresh_remote(&mut self) -> bool {
+        self.remote.refresh()
+    }
+
+    fn on_remote_changed(&mut self) -> Result<()> {
+        let old_center = self.center_layer().map(str::to_string);
+        let old_right = self.global_right_layer();
+        let remote_changed = self.refresh_remote();
+        self.refresh_nvim_bridge()?;
+        let new_center = self.center_layer().map(str::to_string);
+        if remote_changed || old_center != new_center || old_right != self.global_right_layer() {
+            self.needs_complete_redraw = true;
+        }
+        Ok(())
+    }
+
     fn store_terminal(&mut self, state: TerminalState) -> Result<()> {
         let signature = format!(
-            "available={} terminal={} kind={} app={} cmd={} app_pid={:?} nvim_pid={:?} tmux_pane={}",
+            "available={} terminal={} kind={} app={} cmd={} app_pid={:?} nvim_pid={:?} tmux_pane={} ghostty_pid_windows={} ambiguous={}",
             state.available,
             state.terminal,
             state.kind.as_str(),
@@ -485,7 +518,9 @@ impl App {
                 .tmux
                 .as_ref()
                 .map(|tmux| tmux.pane_id.as_str())
-                .unwrap_or("")
+                .unwrap_or(""),
+            state.ghostty_pid_window_count,
+            state.ambiguous
         );
         if signature != self.prev_terminal {
             eprintln!("[dbg {:.6}] TERMINAL {signature}", dbg_ts());
@@ -573,6 +608,18 @@ impl App {
     }
 
     fn refresh_nvim_bridge(&mut self) -> Result<()> {
+        if self.remote_context_active() {
+            if let Some(state) = self
+                .remote
+                .latest_context()
+                .and_then(|context| context.nvim_bridge.clone())
+            {
+                return self.store_nvim_bridge(NvimBridgeSnapshot {
+                    available: true,
+                    selected: Some(state),
+                });
+            }
+        }
         let preferred_pid = self.terminal_nvim_pid();
         let snapshot = self.nvim.refresh(preferred_pid);
         self.store_nvim_bridge(snapshot)
@@ -744,6 +791,7 @@ impl App {
             AppEvent::Libinput(event) => self.on_libinput(event),
             AppEvent::Touch(sample) => self.on_touch(sample)?,
             AppEvent::FocusChanged { class, title } => self.on_focus(&class, &title),
+            AppEvent::RemoteChanged => self.on_remote_changed()?,
             AppEvent::ConfigReload => {
                 self.reload_config(cfg_mgr, self.width)?;
             }
@@ -811,6 +859,13 @@ impl App {
                 .unwrap_or(false)
         {
             next_timeout_ms = min(next_timeout_ms, 500);
+        }
+
+        if self.terminal_app_is(TerminalApp::Ssh)
+            || self.remote_context_active()
+            || self.remote.is_active()
+        {
+            next_timeout_ms = min(next_timeout_ms, 1000);
         }
 
         // A touch awaiting release is on a timer, not an fd event — poll fast
@@ -980,11 +1035,20 @@ impl App {
                         .registry
                         .contains_key(TERMINAL_NVIM_DB_LAYER)
                         .then_some(TERMINAL_NVIM_DB_LAYER)
-                } else if self.is_ghostty_focused() && self.terminal_app_is(TerminalApp::Nvim) {
+                } else if self.is_ghostty_focused()
+                    && self.effective_terminal_app_is(TerminalApp::Nvim)
+                {
                     self.store
                         .registry
                         .contains_key(TERMINAL_NVIM_LAYER)
                         .then_some(TERMINAL_NVIM_LAYER)
+                } else if self.is_ghostty_focused()
+                    && self.effective_terminal_app_is(TerminalApp::Pi)
+                {
+                    self.store
+                        .registry
+                        .contains_key(TERMINAL_PI_LAYER)
+                        .then_some(TERMINAL_PI_LAYER)
                 } else if self.is_chromium_focused() {
                     if self.chromium_media_on_focused_tab() {
                         self.store
@@ -1036,19 +1100,35 @@ impl App {
         self.runtime.text(key::TERMINAL_APP).unwrap_or("") == app.as_str()
     }
 
+    fn remote_context_active(&self) -> bool {
+        self.terminal_app_is(TerminalApp::Ssh) && self.remote.latest_context().is_some()
+    }
+
+    fn remote_app_is(&self, app: TerminalApp) -> bool {
+        self.remote_context_active()
+            && self
+                .remote
+                .latest_context()
+                .is_some_and(|context| context.app == app.as_str())
+    }
+
+    fn effective_terminal_app_is(&self, app: TerminalApp) -> bool {
+        self.terminal_app_is(app) || self.remote_app_is(app)
+    }
+
     fn terminal_nvim_pid(&self) -> Option<u32> {
         let pid = self.runtime.number(key::TERMINAL_NVIM_PID).unwrap_or(0.0) as u32;
         (pid != 0).then_some(pid)
     }
 
     fn nvim_debug_surface_active(&self) -> bool {
-        self.terminal_app_is(TerminalApp::Nvim)
+        self.effective_terminal_app_is(TerminalApp::Nvim)
             && (self.runtime.bool(key::NVIM_DAP_ACTIVE).unwrap_or(false)
                 || self.runtime.bool(key::NVIM_DAPUI_VISIBLE).unwrap_or(false))
     }
 
     fn nvim_test_surface_active(&self) -> bool {
-        self.terminal_app_is(TerminalApp::Nvim)
+        self.effective_terminal_app_is(TerminalApp::Nvim)
             && self
                 .runtime
                 .bool(key::NVIM_NEOTEST_SUMMARY_VISIBLE)
@@ -1056,7 +1136,7 @@ impl App {
     }
 
     fn nvim_db_surface_active(&self) -> bool {
-        self.terminal_app_is(TerminalApp::Nvim)
+        self.effective_terminal_app_is(TerminalApp::Nvim)
             && (self.runtime.bool(key::NVIM_DBUI_VISIBLE).unwrap_or(false)
                 || self.runtime.bool(key::NVIM_DBUI_IN_BUFFER).unwrap_or(false))
     }
@@ -1486,13 +1566,28 @@ impl App {
                 self.needs_complete_redraw = true;
             }
             Action::NvimBridge(action) => {
-                self.nvim.send_action(&action, self.terminal_nvim_pid())?;
+                if self.remote_context_active() && self.remote_app_is(TerminalApp::Nvim) {
+                    self.remote.send_action(&action, None)?;
+                    if self.refresh_remote() {
+                        self.needs_complete_redraw = true;
+                    }
+                } else {
+                    self.nvim.send_action(&action, self.terminal_nvim_pid())?;
+                }
                 self.refresh_nvim_bridge()?;
                 self.needs_complete_redraw = true;
             }
             Action::NvimDbConnect(db_key_name) => {
-                self.nvim
-                    .send_db_connect(&db_key_name, self.terminal_nvim_pid())?;
+                if self.remote_context_active() && self.remote_app_is(TerminalApp::Nvim) {
+                    self.remote
+                        .send_action("dbui.connect", Some(&db_key_name))?;
+                    if self.refresh_remote() {
+                        self.needs_complete_redraw = true;
+                    }
+                } else {
+                    self.nvim
+                        .send_db_connect(&db_key_name, self.terminal_nvim_pid())?;
+                }
                 self.refresh_nvim_bridge()?;
                 self.rstate.modal = None;
                 self.needs_complete_redraw = true;

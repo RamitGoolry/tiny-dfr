@@ -1,0 +1,618 @@
+#!/usr/bin/env python3
+"""
+tiny-dfr remote context helper.
+
+Runs on an SSH target and connects back to local tiny-dfr through an SSH
+RemoteForward Unix socket. It publishes the active remote terminal context as
+JSONL and accepts JSONL action messages for tmux/nvim routing.
+
+Expected SSH config shape on the local machine:
+
+  RemoteForward /tmp/tiny-dfr-%r-%C.sock /run/user/1000/tiny-dfr/remote.sock
+  SetEnv TINY_DFR_REMOTE_SOCK=/tmp/tiny-dfr-%r-%C.sock
+
+Expected remote shell bootstrap uses zsh's &! so the helper is not kept in
+zsh's job table and does not block `exit`:
+
+  if [[ -n "$SSH_TTY" ]]; then
+    tiny_dfr_sock="${TINY_DFR_REMOTE_SOCK:-}"
+    if [[ -z "$tiny_dfr_sock" || ! -S "$tiny_dfr_sock" ]]; then
+      for s in /tmp/tiny-dfr-${USER}-*.sock(N); do tiny_dfr_sock="$s"; break; done
+    fi
+    if [[ -n "$tiny_dfr_sock" && -S "$tiny_dfr_sock" ]]; then
+      tiny-dfr-remote-helper --socket "$tiny_dfr_sock" --ssh-tty "$SSH_TTY" </dev/null >/tmp/tiny-dfr-remote-helper.log 2>&1 &!
+    fi
+  fi
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import selectors
+import socket
+import subprocess
+import sys
+import time
+from pathlib import Path
+from typing import Any
+
+TMUX_FORMAT = (
+    "#{client_pid}\t#{client_tty}\t#{session_name}\t#{window_index}\t"
+    "#{window_name}\t#{pane_index}\t#{pane_id}\t#{pane_pid}\t"
+    "#{pane_current_command}\t#{pane_current_path}\t#{pane_title}"
+)
+
+PI_KEY_ACTIONS = {
+    "pi.abort": ["Escape"],
+    "pi.model": ["C-l"],
+    "pi.think": ["S-Tab"],
+    "pi.tools": ["C-o"],
+    "pi.thinking": ["C-t"],
+    "pi.tree": ["Escape", "Escape"],
+    "pi.submit": ["Enter"],
+}
+
+
+class NvimBridgeCache:
+    def __init__(self) -> None:
+        self.pid_paths: dict[int, Path] = {}
+        self.cwd_paths: dict[str, Path] = {}
+        self.last_discovery_at = 0.0
+        self.discovery_states: list[dict[str, Any]] = []
+
+    def read_path(self, path: Path) -> dict[str, Any] | None:
+        try:
+            state = json.loads(path.read_text())
+        except Exception:
+            return None
+        if not isinstance(state, dict):
+            return None
+        state.setdefault("state_path", str(path))
+        if isinstance(state.get("pid"), int):
+            self.pid_paths[state["pid"]] = path
+        if state.get("cwd"):
+            self.cwd_paths[normalize_path(str(state["cwd"]))] = path
+        return state
+
+    def state_for_pid(self, pid: int | None) -> tuple[dict[str, Any] | None, str]:
+        if not pid:
+            return None, "none"
+        cached = self.pid_paths.get(pid)
+        if cached:
+            state = self.read_path(cached)
+            if state:
+                return state, "pid-cache"
+            self.pid_paths.pop(pid, None)
+        for path in candidate_nvim_bridge_state_paths(pid, recursive=False):
+            state = self.read_path(path)
+            if state:
+                return state, "pid"
+        # Recursive exact-pid search is a last resort and is throttled because
+        # macOS /var/folders can be expensive.
+        if self.should_discover():
+            for state in self.discover_states():
+                if state.get("pid") == pid:
+                    return state, "pid-discovery"
+        return None, "none"
+
+    def state_for_cwd(self, cwd: str | None) -> tuple[dict[str, Any] | None, str]:
+        wanted = normalize_path(cwd)
+        if not wanted:
+            return None, "none"
+        cached = self.cwd_paths.get(wanted)
+        if cached:
+            state = self.read_path(cached)
+            if state and normalize_path(str(state.get("cwd") or "")) == wanted:
+                return state, "cwd-cache"
+            self.cwd_paths.pop(wanted, None)
+        if not self.should_discover():
+            return None, "none"
+        matches = [
+            state
+            for state in self.discover_states()
+            if normalize_path(str(state.get("cwd") or "")) == wanted
+        ]
+        if len(matches) == 1:
+            return matches[0], "cwd"
+        if len(matches) > 1:
+            matches.sort(
+                key=lambda state: (
+                    int(((state.get("dap") or {}).get("updated_at_ms")) or 0),
+                    int(state.get("pid") or 0),
+                )
+            )
+            return matches[-1], "cwd-multiple"
+        return None, "none"
+
+    def discover_states(self) -> list[dict[str, Any]]:
+        self.discovery_states = discover_nvim_bridge_states(self)
+        # Mark completion time, not start time. On macOS a cold discovery can
+        # take seconds; using the start time made every completed scan appear
+        # immediately stale and caused repeated hot-path rescans.
+        self.last_discovery_at = time.monotonic()
+        return self.discovery_states
+
+    def should_discover(self) -> bool:
+        return time.monotonic() - self.last_discovery_at > 2.0
+
+
+def log(message: str) -> None:
+    print(f"tiny-dfr-remote-helper: {message}", file=sys.stderr, flush=True)
+
+
+def run(argv: list[str], timeout: float = 1.0) -> subprocess.CompletedProcess[str] | None:
+    try:
+        return subprocess.run(
+            argv,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=timeout,
+            check=False,
+        )
+    except Exception:
+        return None
+
+
+def command_basename(command: str) -> str:
+    return command.rsplit("/", 1)[-1]
+
+
+def classify_app(command: str) -> str:
+    command = command_basename(command)
+    if command in {"nvim", "vim"}:
+        return "nvim"
+    if command == "pi":
+        return "pi"
+    if command == "ssh":
+        return "ssh"
+    if command in {"zsh", "bash", "fish", "sh"}:
+        return "shell"
+    return "unknown"
+
+
+def read_process_table() -> dict[int, dict[str, Any]]:
+    procs: dict[int, dict[str, Any]] = {}
+    proc = Path("/proc")
+    if not proc.exists():
+        return procs
+    for entry in proc.iterdir():
+        if not entry.name.isdigit():
+            continue
+        pid = int(entry.name)
+        try:
+            stat = (entry / "stat").read_text(errors="replace")
+            after = stat.rsplit(") ", 1)[1].split()
+            ppid = int(after[1])
+            comm = (entry / "comm").read_text(errors="replace").strip()
+        except Exception:
+            continue
+        procs[pid] = {"pid": pid, "ppid": ppid, "comm": comm}
+    return procs
+
+
+def descendants_of(root: int, procs: dict[int, dict[str, Any]]) -> list[int]:
+    children: dict[int, list[int]] = {}
+    for proc in procs.values():
+        children.setdefault(proc["ppid"], []).append(proc["pid"])
+    out: list[int] = []
+    stack = list(children.get(root, []))
+    while stack:
+        pid = stack.pop()
+        out.append(pid)
+        stack.extend(children.get(pid, []))
+    return out
+
+
+def find_process_or_descendant_command(root: int | None, names: set[str]) -> int | None:
+    if not root:
+        return None
+    procs = read_process_table()
+    proc = procs.get(root)
+    if proc and command_basename(proc["comm"]) in names:
+        return root
+    for pid in descendants_of(root, procs):
+        proc = procs.get(pid)
+        if proc and command_basename(proc["comm"]) in names:
+            return pid
+    return None
+
+
+def parse_tmux_line(line: str) -> dict[str, Any] | None:
+    fields = line.rstrip("\n").split("\t")
+    if len(fields) < 11:
+        return None
+    client_pid, client_tty, session, window_index, window_name, pane_index, pane_id, pane_pid, pane_command, pane_path, pane_title = fields[:11]
+    return {
+        "client_pid": int(client_pid) if client_pid.isdigit() else None,
+        "client_tty": client_tty,
+        "session": session,
+        "window_index": window_index,
+        "window_name": window_name,
+        "pane_index": pane_index,
+        "pane_id": pane_id,
+        "pane_pid": int(pane_pid) if pane_pid.isdigit() else None,
+        "pane_command": pane_command,
+        "pane_path": pane_path,
+        "pane_title": pane_title,
+    }
+
+
+def list_tmux_clients() -> list[dict[str, Any]]:
+    result = run(["tmux", "list-clients", "-F", TMUX_FORMAT])
+    if not result or result.returncode != 0:
+        return []
+    return [client for line in result.stdout.splitlines() if (client := parse_tmux_line(line))]
+
+
+def active_tmux_client(ssh_tty: str | None) -> tuple[dict[str, Any] | None, str, int]:
+    clients = list_tmux_clients()
+    if not clients:
+        return None, "none", 0
+
+    # Strongest match when helper is launched from inside an active tmux pane.
+    tmux_pane = os.environ.get("TMUX_PANE")
+    if tmux_pane:
+        for client in clients:
+            if client.get("pane_id") == tmux_pane:
+                return client, "tmux_pane", len(clients)
+
+    # Normal SSH-shell bootstrap path: match this SSH pty to the tmux client pty.
+    if ssh_tty:
+        for client in clients:
+            if client.get("client_tty") == ssh_tty:
+                return client, "ssh_tty", len(clients)
+
+    # Important: do not fall back to an arbitrary global tmux client. If the
+    # current SSH session is just a raw shell, unrelated tmux clients can exist on
+    # the host and must not drive local Touch Bar state.
+    return None, "unmatched", len(clients)
+
+
+def tiny_dfr_runtime_root() -> Path:
+    if runtime_dir := os.environ.get("TINY_DFR_RUNTIME_DIR"):
+        return Path(runtime_dir)
+    if xdg_runtime := os.environ.get("XDG_RUNTIME_DIR"):
+        return Path(xdg_runtime) / "tiny-dfr"
+    user = os.environ.get("USER") or os.environ.get("LOGNAME") or str(os.getuid())
+    return Path(f"/tmp/tiny-dfr-{user}")
+
+
+def nvim_bridge_search_roots() -> list[Path]:
+    roots: list[Path] = []
+    seen: set[str] = set()
+
+    def add(path: Path) -> None:
+        key = str(path)
+        if key not in seen:
+            seen.add(key)
+            roots.append(path)
+
+    add(tiny_dfr_runtime_root())
+    if xdg_runtime := os.environ.get("XDG_RUNTIME_DIR"):
+        add(Path(xdg_runtime) / "tiny-dfr")
+    # Compatibility fallback for old local Linux bridge deployments.
+    add(Path(f"/run/user/{os.getuid()}") / "tiny-dfr")
+    return roots
+
+
+def candidate_nvim_bridge_state_paths(pid: int, recursive: bool = True) -> list[Path]:
+    candidates: list[Path] = []
+    seen: set[str] = set()
+
+    def add(path: Path) -> None:
+        key = str(path)
+        if key not in seen:
+            seen.add(key)
+            candidates.append(path)
+
+    for root in nvim_bridge_search_roots():
+        add(root / "nvim" / f"{pid}.json")
+        if not recursive or not root.exists():
+            continue
+        try:
+            for path in root.glob(f"nvim/{pid}.json"):
+                add(path)
+        except Exception:
+            pass
+
+    return candidates
+
+
+def discover_nvim_bridge_states(cache: NvimBridgeCache) -> list[dict[str, Any]]:
+    states: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for root in nvim_bridge_search_roots():
+        if not root.exists():
+            continue
+        try:
+            paths = root.glob("nvim/*.json")
+        except Exception:
+            continue
+        for path in paths:
+            key = str(path)
+            if key in seen:
+                continue
+            seen.add(key)
+            state = cache.read_path(path)
+            if state:
+                states.append(state)
+    return states
+
+
+def normalize_path(path: str | None) -> str:
+    if not path:
+        return ""
+    try:
+        return str(Path(path).expanduser().resolve())
+    except Exception:
+        return str(path)
+
+
+def build_context(session_id: str, ssh_tty: str | None, bridge_cache: NvimBridgeCache) -> dict[str, Any]:
+    host = socket.gethostname()
+    client, tmux_match_source, tmux_client_count = active_tmux_client(ssh_tty)
+    base: dict[str, Any] = {
+        "type": "context",
+        "version": 1,
+        "session_id": session_id,
+        "host": host,
+        "ssh_tty": ssh_tty or "",
+        "tmux_match_source": tmux_match_source,
+        "tmux_client_count": tmux_client_count,
+        "updated_at_ms": int(time.time() * 1000),
+    }
+    if client:
+        command = client.get("pane_command") or ""
+        app = classify_app(command)
+        pane_pid = client.get("pane_pid")
+        # On Linux, /proc lets us verify pane_pid/descendants. On macOS/BSD
+        # there is no /proc, so when tmux itself reports pane_current_command as
+        # nvim/vim, trust pane_pid as the editor pid.
+        if app == "nvim":
+            nvim_pid = find_process_or_descendant_command(pane_pid, {"nvim", "vim"}) or pane_pid
+        else:
+            nvim_pid = find_process_or_descendant_command(pane_pid, {"nvim", "vim"})
+            if nvim_pid:
+                app = "nvim"
+        bridge, nvim_match_source = bridge_cache.state_for_pid(nvim_pid)
+        if app == "nvim" and not bridge:
+            bridge, nvim_match_source = bridge_cache.state_for_cwd(client.get("pane_path"))
+        if bridge and bridge.get("pid"):
+            nvim_pid = int(bridge["pid"])
+        base.update(
+            {
+                "kind": "tmux",
+                "app": app,
+                "command": command,
+                "cwd": client.get("pane_path") or "",
+                "tmux": client,
+                "app_pid": nvim_pid or pane_pid,
+                "nvim_pid": nvim_pid,
+                "nvim_match_source": nvim_match_source,
+                "nvim_bridge": bridge,
+            }
+        )
+    else:
+        base.update(
+            {
+                "kind": "direct",
+                "app": "shell",
+                "command": command_basename(os.environ.get("SHELL", "sh")),
+                "cwd": os.getcwd(),
+                "tmux": None,
+                "app_pid": None,
+                "nvim_pid": None,
+                "nvim_match_source": "none",
+                "nvim_bridge": None,
+            }
+        )
+    return base
+
+
+def send_json(sock: socket.socket, message: dict[str, Any]) -> None:
+    data = json.dumps(message, separators=(",", ":"), sort_keys=True).encode() + b"\n"
+    sock.sendall(data)
+
+
+def send_tmux_keys(pane_id: str | None, keys: list[str]) -> bool:
+    if not pane_id or not keys:
+        return False
+    result = run(["tmux", "send-keys", "-t", pane_id, *keys], timeout=1.0)
+    return bool(result and result.returncode == 0)
+
+
+def send_nvim_action(
+    current_context: dict[str, Any],
+    action: str,
+    request_id: str | None = None,
+    db_key_name: str | None = None,
+    bridge_cache: NvimBridgeCache | None = None,
+) -> bool:
+    pid = current_context.get("nvim_pid")
+    bridge = current_context.get("nvim_bridge")
+    socket_path = bridge.get("socket") if isinstance(bridge, dict) else None
+    if not socket_path and bridge_cache is not None:
+        state, _match_source = bridge_cache.state_for_pid(int(pid) if pid else None)
+        socket_path = state.get("socket") if isinstance(state, dict) else None
+    if not socket_path:
+        return False
+    payload = {"id": request_id or f"remote-{int(time.time() * 1000)}", "action": action}
+    if db_key_name:
+        payload["db_key_name"] = db_key_name
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.settimeout(1.0)
+            sock.connect(socket_path)
+            send_json(sock, payload)
+        return True
+    except Exception as exc:
+        log(f"nvim action failed: {exc}")
+        return False
+
+
+def handle_action(message: dict[str, Any], current_context: dict[str, Any], bridge_cache: NvimBridgeCache) -> dict[str, Any] | None:
+    action = message.get("action")
+    request_id = message.get("id")
+    ok = False
+    error = None
+    try:
+        tmux = current_context.get("tmux") or {}
+        pane_id = tmux.get("pane_id")
+        if action in PI_KEY_ACTIONS:
+            ok = send_tmux_keys(pane_id, PI_KEY_ACTIONS[action])
+            if not ok:
+                error = "failed to send tmux keys"
+        elif action == "tmux.send_keys":
+            keys = message.get("keys") or []
+            ok = send_tmux_keys(pane_id, [str(key) for key in keys])
+            if not ok:
+                error = "failed to send tmux keys"
+        elif isinstance(action, str) and (action.startswith("dap.") or action.startswith("dapui.") or action.startswith("debug.") or action.startswith("neotest.") or action.startswith("dbui.")):
+            db_key_name = message.get("db_key_name")
+            ok = send_nvim_action(
+                current_context,
+                action,
+                request_id,
+                str(db_key_name) if db_key_name else None,
+                bridge_cache,
+            )
+            if not ok:
+                error = "failed to send nvim action"
+        else:
+            error = f"unknown action: {action}"
+    except Exception as exc:
+        error = str(exc)
+    return {"type": "action_result", "id": request_id, "ok": ok, "error": error}
+
+
+def derive_session_id(socket_path: str) -> str:
+    explicit = os.environ.get("TINY_DFR_SESSION_ID")
+    if explicit:
+        return explicit
+    name = Path(socket_path).name
+    for suffix in (".sock", ".socket"):
+        if name.endswith(suffix):
+            name = name[: -len(suffix)]
+    return name or socket_path
+
+
+def connect(path: str) -> socket.socket:
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.connect(path)
+    sock.setblocking(False)
+    return sock
+
+
+def parent_session_gone(initial_parent_pid: int) -> bool:
+    # The helper is launched from the interactive remote shell. When that shell
+    # exits, a disowned helper is reparented; at that point this SSH-session helper
+    # should stop retrying instead of lingering forever.
+    return initial_parent_pid > 1 and os.getppid() != initial_parent_pid
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Publish remote SSH/tmux/nvim context to tiny-dfr")
+    parser.add_argument("--socket", default=os.environ.get("TINY_DFR_REMOTE_SOCK"), help="forwarded Unix socket path")
+    parser.add_argument("--ssh-tty", default=os.environ.get("SSH_TTY"), help="remote SSH tty to match against tmux client_tty")
+    parser.add_argument("--interval", type=float, default=0.5, help="context refresh interval in seconds")
+    parser.add_argument("--once", action="store_true", help="emit one context message then exit")
+    args = parser.parse_args()
+
+    if not args.socket:
+        log("missing --socket or TINY_DFR_REMOTE_SOCK")
+        return 2
+
+    session_id = derive_session_id(args.socket)
+    selector = selectors.DefaultSelector()
+    recv_buffer = b""
+    current_context: dict[str, Any] = {}
+    last_sent = ""
+    initial_parent_pid = os.getppid()
+    bridge_cache = NvimBridgeCache()
+
+    while True:
+        if parent_session_gone(initial_parent_pid):
+            log("parent shell exited; stopping")
+            return 0
+        try:
+            log(f"connecting to {args.socket}")
+            sock = connect(args.socket)
+            selector.register(sock, selectors.EVENT_READ)
+            send_json(
+                sock,
+                {
+                    "type": "hello",
+                    "version": 1,
+                    "session_id": session_id,
+                    "host": socket.gethostname(),
+                    "ssh_tty": args.ssh_tty or "",
+                    "pid": os.getpid(),
+                },
+            )
+            while True:
+                if parent_session_gone(initial_parent_pid):
+                    log("parent shell exited; stopping")
+                    return 0
+                current_context = build_context(session_id, args.ssh_tty, bridge_cache)
+                encoded_context = json.dumps(current_context, sort_keys=True)
+                if encoded_context != last_sent:
+                    send_json(sock, current_context)
+                    last_sent = encoded_context
+                if args.once:
+                    return 0
+
+                deadline = time.monotonic() + args.interval
+                while time.monotonic() < deadline:
+                    if parent_session_gone(initial_parent_pid):
+                        log("parent shell exited; stopping")
+                        return 0
+                    timeout = max(0.0, deadline - time.monotonic())
+                    for key, _events in selector.select(timeout):
+                        try:
+                            chunk = key.fileobj.recv(4096)
+                        except BlockingIOError:
+                            continue
+                        if not chunk:
+                            raise ConnectionError("local socket closed")
+                        recv_buffer += chunk
+                        while b"\n" in recv_buffer:
+                            line, recv_buffer = recv_buffer.split(b"\n", 1)
+                            if not line.strip():
+                                continue
+                            try:
+                                message = json.loads(line)
+                            except Exception as exc:
+                                log(f"invalid JSON from local side: {exc}")
+                                continue
+                            if message.get("type") == "action" or "action" in message:
+                                response = handle_action(message, current_context, bridge_cache)
+                                if response:
+                                    send_json(sock, response)
+                                # Actions often change the selected nvim surface
+                                # (debug/test/db). Emit a refreshed context
+                                # immediately instead of waiting for the next
+                                # periodic tick.
+                                time.sleep(0.10)
+                                current_context = build_context(session_id, args.ssh_tty, bridge_cache)
+                                send_json(sock, current_context)
+                                last_sent = json.dumps(current_context, sort_keys=True)
+        except KeyboardInterrupt:
+            return 130
+        except Exception as exc:
+            if parent_session_gone(initial_parent_pid):
+                log("parent shell exited; stopping")
+                return 0
+            log(f"disconnected: {exc}; retrying")
+            try:
+                selector.close()
+            except Exception:
+                pass
+            selector = selectors.DefaultSelector()
+            time.sleep(1.0)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -4,6 +4,7 @@ pub(crate) enum AppEvent {
     Libinput(::input::event::Event),
     Touch(TouchSample),
     FocusChanged { class: String, title: String },
+    RemoteChanged,
     ConfigReload,
     Tick,
 }
