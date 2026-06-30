@@ -16,6 +16,11 @@ pub(crate) mod key {
     pub(crate) const AUDIO_VOLUME: &str = "audio.volume";
     pub(crate) const CONTEXT_FOCUS_CLASS: &str = "context.focus.class";
     pub(crate) const CONTEXT_FOCUS_TITLE: &str = "context.focus.title";
+    pub(crate) const MEDIA_ACTIVE_PLAYER: &str = "media.active.player";
+    pub(crate) const MEDIA_ACTIVE_STATUS: &str = "media.active.status";
+    pub(crate) const MEDIA_ACTIVE_ART_URL: &str = "media.active.art_url";
+    pub(crate) const MEDIA_ACTIVE_LENGTH: &str = "media.active.length";
+    pub(crate) const MEDIA_ACTIVE_POSITION: &str = "media.active.position";
 }
 
 /// Validated dotted state key, e.g. `hardware.brightness`.

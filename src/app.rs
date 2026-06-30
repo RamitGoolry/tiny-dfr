@@ -27,6 +27,7 @@ use crate::function_layer::LayerArea;
 use crate::input::toggle_keys;
 use crate::kbd_backlight::KbdBacklight;
 use crate::layer::{LayerStore, ResolverState, TouchTarget};
+use crate::mpris::{MediaState, MprisClient};
 use crate::pixel_shift::PixelShiftManager;
 use crate::store::{key, StateKey, Store, Value};
 use crate::touch::{TouchPhase, TouchSample};
@@ -56,6 +57,7 @@ pub(crate) struct App {
     kbd: KbdBacklight,
     /// PipeWire default sink volume, driven by the volume slider.
     volume: VolumeMixer,
+    mpris: MprisClient,
     uinput: UInputHandle<File>,
     cfg: Config,
     width: u16,
@@ -92,6 +94,7 @@ impl App {
         let last = Instant::now();
         // In-process PipeWire volume via wpctl (see volume.rs); spawns its apply thread.
         let volume = VolumeMixer::new();
+        let mpris = MprisClient::new();
         let mut runtime = Store::new();
         runtime
             .set(
@@ -107,6 +110,21 @@ impl App {
             .expect("built-in Store key must be valid");
         runtime
             .set(key::CONTEXT_FOCUS_TITLE, Value::Text(String::new()))
+            .expect("built-in Store key must be valid");
+        runtime
+            .set(key::MEDIA_ACTIVE_PLAYER, Value::Text(String::new()))
+            .expect("built-in Store key must be valid");
+        runtime
+            .set(key::MEDIA_ACTIVE_STATUS, Value::Text(String::new()))
+            .expect("built-in Store key must be valid");
+        runtime
+            .set(key::MEDIA_ACTIVE_ART_URL, Value::Text(String::new()))
+            .expect("built-in Store key must be valid");
+        runtime
+            .set(key::MEDIA_ACTIVE_LENGTH, Value::Number(0.0))
+            .expect("built-in Store key must be valid");
+        runtime
+            .set(key::MEDIA_ACTIVE_POSITION, Value::Number(0.0))
             .expect("built-in Store key must be valid");
         runtime.clear_dirty();
 
@@ -164,6 +182,7 @@ impl App {
             backlight,
             kbd,
             volume,
+            mpris,
             uinput,
             cfg,
             width: geometry.width,
@@ -185,6 +204,28 @@ impl App {
         )?;
         self.runtime
             .set(key::HARDWARE_KBD_ILLUM, Value::Number(self.kbd.level()))?;
+        self.refresh_media()?;
+        Ok(())
+    }
+
+    fn refresh_media(&mut self) -> Result<()> {
+        if let Some(media) = self.mpris.refresh()? {
+            self.store_media(media)?;
+        }
+        Ok(())
+    }
+
+    fn store_media(&mut self, media: MediaState) -> Result<()> {
+        self.runtime
+            .set(key::MEDIA_ACTIVE_PLAYER, Value::Text(media.player))?;
+        self.runtime
+            .set(key::MEDIA_ACTIVE_STATUS, Value::Text(media.status))?;
+        self.runtime
+            .set(key::MEDIA_ACTIVE_ART_URL, Value::Text(media.art_url))?;
+        self.runtime
+            .set(key::MEDIA_ACTIVE_LENGTH, Value::Number(media.length_us))?;
+        self.runtime
+            .set(key::MEDIA_ACTIVE_POSITION, Value::Number(media.position_us))?;
         Ok(())
     }
 
@@ -292,6 +333,10 @@ impl App {
             next_timeout_ms = min(next_timeout_ms, pixel_shift_next_timeout_ms);
         }
 
+        if self.frame_faster_refresh() {
+            next_timeout_ms = min(next_timeout_ms, 1000);
+        }
+
         // A touch awaiting release is on a timer, not an fd event — poll fast
         // enough to catch it, else the loop sleeps up to TIMEOUT_MS and the
         // release (and the key-up it sends) lags by seconds.
@@ -299,6 +344,18 @@ impl App {
             next_timeout_ms = min(next_timeout_ms, TOUCH_ACTIVE_POLL_MS);
         }
         next_timeout_ms
+    }
+
+    fn frame_faster_refresh(&self) -> bool {
+        self.rstate
+            .modal
+            .as_deref()
+            .is_some_and(|layer| self.store.get(layer).faster_refresh())
+            || self.store.get(GLOBAL_LEFT_LAYER).faster_refresh()
+            || self
+                .center_layer()
+                .is_some_and(|layer| self.store.get(layer).faster_refresh())
+            || self.store.get(GLOBAL_RIGHT_LAYER).faster_refresh()
     }
 
     /// Per-iteration time trigger: when the active layer shows the clock, force a full
@@ -529,21 +586,24 @@ impl App {
         }
     }
 
-    fn hit_layer(&self, layer: &str, x: f64, y: f64, i: Option<usize>) -> Option<usize> {
-        let area = if self.rstate.modal.as_deref() == Some(layer) {
-            LayerArea::full(self.width as i32, self.height as i32)
+    fn area_for_layer(&self, layer: &str) -> Option<LayerArea> {
+        if self.rstate.modal.as_deref() == Some(layer) {
+            return Some(LayerArea::full(self.width as i32, self.height as i32));
+        }
+        let (left, center, right) = self.bar_areas(self.width as i32, self.height as i32);
+        if layer == GLOBAL_LEFT_LAYER {
+            Some(left)
+        } else if layer == GLOBAL_RIGHT_LAYER {
+            Some(right)
+        } else if self.center_layer() == Some(layer) {
+            Some(center)
         } else {
-            let (left, center, right) = self.bar_areas(self.width as i32, self.height as i32);
-            if layer == GLOBAL_LEFT_LAYER {
-                left
-            } else if layer == GLOBAL_RIGHT_LAYER {
-                right
-            } else if self.center_layer() == Some(layer) {
-                center
-            } else {
-                return None;
-            }
-        };
+            None
+        }
+    }
+
+    fn hit_layer(&self, layer: &str, x: f64, y: f64, i: Option<usize>) -> Option<usize> {
+        let area = self.area_for_layer(layer)?;
         self.store.get(layer).hit_in(area, x, y, i)
     }
 
@@ -581,7 +641,13 @@ impl App {
                 let hit = self.hit_bar(x, y);
                 eprintln!("[dbg {:.6}] DOWN x={x:.0} y={y:.0} hit={hit:?}", dbg_ts());
                 if let Some((active, btn)) = hit {
-                    let action = self.store.get_mut(&active).on_press(btn, &self.runtime);
+                    let area = self
+                        .area_for_layer(&active)
+                        .ok_or_else(|| anyhow!("no area for active layer `{active}`"))?;
+                    let action =
+                        self.store
+                            .get_mut(&active)
+                            .on_press_at(btn, &self.runtime, area, x);
                     // A modal hand-off (OpenModal) records its own Slider
                     // target inside `apply`; everything else is a button.
                     if !matches!(action, Some(Action::OpenModal(_))) {
@@ -603,10 +669,17 @@ impl App {
                     // leaving releases — both no-ops if already in that
                     // state, so we just call the matching edge each move.
                     let hit = self.hit_layer(&layer, x, y, Some(btn)).is_some();
+                    let area = self
+                        .area_for_layer(&layer)
+                        .ok_or_else(|| anyhow!("no area for active layer `{layer}`"))?;
                     let action = if hit {
-                        self.store.get_mut(&layer).on_press(btn, &self.runtime)
+                        self.store
+                            .get_mut(&layer)
+                            .on_press_at(btn, &self.runtime, area, x)
                     } else {
-                        self.store.get_mut(&layer).on_release(btn, &self.runtime)
+                        self.store
+                            .get_mut(&layer)
+                            .on_release_at(btn, &self.runtime, area)
                     };
                     self.apply(action, x)?;
                 }
@@ -622,7 +695,12 @@ impl App {
                 eprintln!("[dbg {:.6}] UP removed={}", dbg_ts(), removed.is_some());
                 let action = match removed {
                     Some(TouchTarget::Button { layer, btn }) => {
-                        self.store.get_mut(&layer).on_release(btn, &self.runtime)
+                        let area = self
+                            .area_for_layer(&layer)
+                            .ok_or_else(|| anyhow!("no area for active layer `{layer}`"))?;
+                        self.store
+                            .get_mut(&layer)
+                            .on_release_at(btn, &self.runtime, area)
                     }
                     Some(TouchTarget::Slider { .. }) => Some(Action::CloseModal),
                     None => None,
@@ -661,6 +739,18 @@ impl App {
             Action::SetVolume(level) => {
                 self.volume.set_level(level);
                 self.runtime.set(key::AUDIO_VOLUME, Value::Number(level))?;
+            }
+            Action::MediaPrevious => {
+                self.mpris.previous()?;
+                self.refresh_media()?;
+            }
+            Action::MediaPlayPause => {
+                self.mpris.play_pause()?;
+                self.refresh_media()?;
+            }
+            Action::MediaNext => {
+                self.mpris.next()?;
+                self.refresh_media()?;
             }
             Action::OpenModal(target) => {
                 let slider_key = self.store.get(&target).slider_key()?;

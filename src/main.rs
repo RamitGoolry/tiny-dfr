@@ -29,6 +29,7 @@ mod function_layer;
 mod input;
 mod kbd_backlight;
 mod layer;
+mod mpris;
 mod pixel_shift;
 mod store;
 mod touch;

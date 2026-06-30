@@ -5,9 +5,11 @@
 //! the App stays the single effectful place.
 pub(crate) mod button;
 pub(crate) mod indicator;
+pub(crate) mod media;
 pub(crate) mod slider;
 
 pub(crate) use button::Button;
+pub(crate) use media::MediaWidget;
 pub(crate) use slider::{BrightnessSlider, KbdIllumSlider, Slider, VolumeSlider};
 
 use anyhow::Result;
@@ -113,6 +115,7 @@ pub(crate) trait SliderBackend {
 pub(crate) enum Widget {
     Button(Button),
     Slider(Slider),
+    Media(MediaWidget),
     Indicator(Box<dyn IndicatorBackend>),
     Spacer,
 }
@@ -137,6 +140,8 @@ impl Widget {
                 &time,
                 cfg.locale.as_deref(),
             )?)))
+        } else if cfg.media.is_some() {
+            Ok(Widget::Media(MediaWidget::new()))
         } else if let Some(battery_mode) = cfg.battery {
             if let Some(battery) = find_battery_device() {
                 Ok(Widget::Indicator(Box::new(BatteryIndicator::new(
@@ -163,6 +168,7 @@ impl Widget {
         match self {
             Widget::Button(b) => b.changed,
             Widget::Slider(sl) => sl.changed,
+            Widget::Media(media) => media.needs_redraw(store),
             Widget::Indicator(i) => i.needs_redraw(store),
             Widget::Spacer => false,
         }
@@ -171,7 +177,10 @@ impl Widget {
     /// Whether a touch landing on this widget should be dispatched to it. Buttons
     /// and sliders are interactive; indicators and spacers are passive.
     pub(crate) fn interactive(&self) -> bool {
-        matches!(self, Widget::Button(_) | Widget::Slider(_))
+        matches!(
+            self,
+            Widget::Button(_) | Widget::Slider(_) | Widget::Media(_)
+        )
     }
 
     pub(crate) fn draw(
@@ -186,6 +195,7 @@ impl Widget {
         match self {
             Widget::Button(b) => b.draw(c, cfg, region, store, complete_redraw),
             Widget::Slider(s) => Ok(s.draw(c, width, region.height, complete_redraw)),
+            Widget::Media(m) => m.draw(c, cfg, region, store, complete_redraw),
             Widget::Indicator(b) => b.draw(c, region, store, complete_redraw),
             Widget::Spacer => Ok(vec![]),
         }
@@ -199,7 +209,11 @@ impl Widget {
     }
 
     pub(crate) fn needs_faster_refresh(&self) -> bool {
-        matches!(self, Widget::Indicator(i) if i.needs_faster_refresh())
+        match self {
+            Widget::Media(_) => true,
+            Widget::Indicator(i) => i.needs_faster_refresh(),
+            _ => false,
+        }
     }
 
     pub(crate) fn is_clock(&self) -> bool {

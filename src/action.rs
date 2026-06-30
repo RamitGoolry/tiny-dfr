@@ -21,6 +21,12 @@ pub(crate) enum Action {
     SetKbdIllum(f64),
     /// Set the default PipeWire sink volume to `level` (0.0..=1.0).
     SetVolume(f64),
+    /// Send the active MPRIS player to the previous track.
+    MediaPrevious,
+    /// Toggle play/pause on the active MPRIS player.
+    MediaPlayPause,
+    /// Send the active MPRIS player to the next track.
+    MediaNext,
     /// Enter the named layer as a momentary modal (e.g. a slider).
     OpenModal(String),
     /// Leave the current modal layer.

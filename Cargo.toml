@@ -26,6 +26,7 @@ freetype-rs = "0.38"
 freedesktop-icons = "0.4.0"
 chrono = { version = "0.4", features = ["unstable-locales"] }
 udev = "0.9"
+zbus = "5.16.0"
 
 [build-dependencies]
 pkg-config = "0.3"

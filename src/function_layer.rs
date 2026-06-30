@@ -87,16 +87,31 @@ impl FunctionLayer {
         self.cells.iter().any(|c| c.widget.changed(store))
     }
     /// Press the interactive widget in cell `i`, returning its effect (if any).
-    pub(crate) fn on_press(&mut self, i: usize, store: &Store) -> Option<Action> {
+    pub(crate) fn on_press_at(
+        &mut self,
+        i: usize,
+        store: &Store,
+        area: LayerArea,
+        x: f64,
+    ) -> Option<Action> {
+        let region = self.region_for(area, i)?;
         match self.cells.get_mut(i).map(|c| &mut c.widget) {
             Some(Widget::Button(b)) => b.on_press(store),
+            Some(Widget::Media(m)) => m.on_press(x, &region),
             _ => None,
         }
     }
     /// Release the interactive widget in cell `i`, returning its effect (if any).
-    pub(crate) fn on_release(&mut self, i: usize, store: &Store) -> Option<Action> {
+    pub(crate) fn on_release_at(
+        &mut self,
+        i: usize,
+        store: &Store,
+        area: LayerArea,
+    ) -> Option<Action> {
+        let _region = self.region_for(area, i)?;
         match self.cells.get_mut(i).map(|c| &mut c.widget) {
             Some(Widget::Button(b)) => b.on_release(store),
+            Some(Widget::Media(m)) => m.on_release(),
             _ => None,
         }
     }
@@ -245,6 +260,29 @@ impl FunctionLayer {
         i: Option<usize>,
     ) -> Option<usize> {
         self.hit_in(LayerArea::full(width as i32, height as i32), x, y, i)
+    }
+
+    fn region_for(&self, area: LayerArea, i: usize) -> Option<Region> {
+        if i >= self.cells.len() {
+            return None;
+        }
+        let virtual_button_width = (area.width
+            - (BUTTON_SPACING_PX * (self.virtual_button_count - 1) as i32))
+            .max(1) as f64
+            / self.virtual_button_count as f64;
+        let start: usize = self.cells[..i].iter().map(|c| c.stretch).sum();
+        let end = start + self.cells[i].stretch;
+        let left_edge =
+            area.left + (start as f64 * (virtual_button_width + BUTTON_SPACING_PX as f64)).floor();
+        let button_width = virtual_button_width
+            + ((end - start - 1) as f64 * (virtual_button_width + BUTTON_SPACING_PX as f64))
+                .floor();
+        Some(Region {
+            left: left_edge,
+            width: button_width,
+            height: area.height,
+            y_shift: 0.0,
+        })
     }
 
     pub(crate) fn hit_in(
