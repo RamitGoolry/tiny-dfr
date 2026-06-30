@@ -191,12 +191,21 @@ impl KeyButton {
     ) {
         match &self.content {
             ButtonImage::Text(text) => {
+                c.save().unwrap();
+                if text == "×" {
+                    c.set_font_size(42.0);
+                }
                 let extents = c.text_extents(text).unwrap();
                 c.move_to(
-                    button_left_edge + (button_width as f64 / 2.0 - extents.width() / 2.0).round(),
-                    y_shift + (height as f64 / 2.0 + extents.height() / 2.0).round(),
+                    button_left_edge
+                        + (button_width as f64 / 2.0 - extents.width() / 2.0 - extents.x_bearing())
+                            .round(),
+                    y_shift
+                        + (height as f64 / 2.0 - extents.height() / 2.0 - extents.y_bearing())
+                            .round(),
                 );
                 c.show_text(text).unwrap();
+                c.restore().unwrap();
             }
             ButtonImage::Svg(svg) => {
                 let x =

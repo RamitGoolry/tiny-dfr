@@ -466,7 +466,8 @@ impl App {
     fn bar_areas(&self, width: i32, height: i32) -> (LayerArea, LayerArea, LayerArea) {
         // Compact always-global edge controls. The app-control center gets the
         // remaining width instead of making Esc/Volume/Brightness full row cells.
-        let global_button_width = (height * 3).clamp(140, 220);
+        let global_button_width = ((height as f64) * 2.5).round() as i32;
+        let global_button_width = global_button_width.clamp(120, 190);
         let right_count = if self.should_show_global_media_button() {
             3
         } else {
