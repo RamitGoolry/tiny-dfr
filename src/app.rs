@@ -5,7 +5,7 @@ use ::input::event::{
     keyboard::{KeyState, KeyboardEvent, KeyboardEventTrait},
     Event,
 };
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context as AnyhowContext, Result};
 use cairo::{Context, Format, ImageSurface};
 use chrono::{Local, Timelike};
 use input_linux::{uinput::UInputHandle, EventKind, Key};
@@ -543,11 +543,23 @@ impl App {
             self.draw_frame(width_i, height_i, shift)?
         };
         let t_draw = t_r.elapsed();
-        let data = self.surface.data()?;
-        drm.map()?.as_mut()[..data.len()].copy_from_slice(&data);
+        let data = self
+            .surface
+            .data()
+            .context("render: borrowing cairo surface data")?;
+        drm.map()
+            .context("render: mapping DRM dumb buffer")?
+            .as_mut()[..data.len()]
+            .copy_from_slice(&data);
         // Partial (per-button) damage, as before; the probe times the push.
+        // appletbdrm rejects an empty dirty-rect list with EINVAL; an empty list
+        // simply means no framebuffer region needs to be pushed this frame.
         let t_d = Instant::now();
-        drm.dirty(&clips)?;
+        if !clips.is_empty() {
+            drm.dirty(&clips).with_context(|| {
+                format!("render: dirty framebuffer mode=({height},{width}) clips={clips:?}")
+            })?;
+        }
         let t_dirty = t_d.elapsed();
         eprintln!(
             "[dbg {:.6}] REDRAW draw={}ms dirty={}ms clips={} complete={}",
@@ -601,6 +613,7 @@ impl App {
             .last()
             .map(String::as_str)
             .filter(|layer| self.store.registry.contains_key(*layer))
+            .or_else(|| self.fn_base_center_layer())
             .or_else(|| {
                 if self.is_chromium_focused() {
                     if self.chromium_media_on_focused_tab() {
@@ -621,6 +634,14 @@ impl App {
                         .filter(|layer| self.store.registry.contains_key(*layer))
                 }
             })
+    }
+
+    fn fn_base_center_layer(&self) -> Option<&str> {
+        if !self.rstate.fn_pressed {
+            return None;
+        }
+        let layer = self.store.base_order[self.rstate.fn_pressed as usize].as_str();
+        self.store.registry.contains_key(layer).then_some(layer)
     }
 
     fn is_chromium_focused(&self) -> bool {
@@ -777,9 +798,19 @@ impl App {
         c.move_to(24.0, height as f64 * 0.68);
         c.show_text(&line)?;
 
-        let data = self.surface.data()?;
-        drm.map()?.as_mut()[..data.len()].copy_from_slice(&data);
-        drm.dirty(&[drm::control::ClipRect::new(0, 0, height, width)])?;
+        drop(c);
+        let data = self
+            .surface
+            .data()
+            .context("render_error: borrowing cairo surface data")?;
+        drm.map()
+            .context("render_error: mapping DRM dumb buffer")?
+            .as_mut()[..data.len()]
+            .copy_from_slice(&data);
+        let clips = [drm::control::ClipRect::new(0, 0, height, width)];
+        drm.dirty(&clips).with_context(|| {
+            format!("render_error: dirty framebuffer mode=({height},{width}) clips={clips:?}")
+        })?;
         self.needs_complete_redraw = true;
         Ok(())
     }
