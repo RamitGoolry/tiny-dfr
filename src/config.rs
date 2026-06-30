@@ -15,13 +15,7 @@ use serde::{
     Deserialize, Deserializer,
 };
 use std::{
-    collections::HashMap,
-    env,
-    fmt,
-    fs::read_to_string,
-    io::ErrorKind,
-    os::fd::AsFd,
-    path::PathBuf,
+    collections::HashMap, env, fmt, fs::read_to_string, io::ErrorKind, os::fd::AsFd, path::PathBuf,
 };
 
 const USER_CFG_REL_PATH: &str = ".config/tiny-dfr/config.toml";
@@ -156,8 +150,9 @@ fn load_config(width: u16) -> Result<(Config, LayerStore)> {
             }
             Err(e) if e.kind() == ErrorKind::NotFound => {}
             Err(e) => {
-                return Err(anyhow::Error::from(e)
-                    .context(format!("reading {}", user_cfg_path.display())))
+                return Err(
+                    anyhow::Error::from(e).context(format!("reading {}", user_cfg_path.display()))
+                )
             }
         }
     }

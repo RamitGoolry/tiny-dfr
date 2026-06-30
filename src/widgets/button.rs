@@ -13,7 +13,7 @@ use drm::control::ClipRect;
 
 use crate::action::{Action, Edge};
 use crate::config::{ButtonConfig, Config};
-use crate::state::State;
+use crate::store::Store;
 use crate::widgets::{ButtonBackend, Region};
 use crate::{dbg_ts, BUTTON_COLOR_ACTIVE, BUTTON_COLOR_INACTIVE, DEFAULT_ICON_SIZE};
 
@@ -202,10 +202,10 @@ impl KeyButton {
 }
 
 impl ButtonBackend for KeyButton {
-    fn draw_content(&self, c: &Context, r: &Region, _s: &State) {
+    fn draw_content(&self, c: &Context, r: &Region, _store: &Store) {
         self.render(c, r.height, r.left, r.width.ceil() as u64, r.y_shift);
     }
-    fn on_press(&mut self, _s: &State) -> Option<Action> {
+    fn on_press(&mut self, _store: &Store) -> Option<Action> {
         if let Some(layer) = &self.open_layer {
             Some(Action::OpenModal(layer.clone()))
         } else if self.keys.is_empty() {
@@ -214,7 +214,7 @@ impl ButtonBackend for KeyButton {
             Some(Action::Key(self.keys.clone(), Edge::Press))
         }
     }
-    fn on_release(&mut self, _s: &State) -> Option<Action> {
+    fn on_release(&mut self, _store: &Store) -> Option<Action> {
         if self.open_layer.is_some() || self.keys.is_empty() {
             None
         } else {
@@ -259,8 +259,8 @@ impl Button {
     /// modal, which must not leave the trigger lit) and return the backend's
     /// effect. Idempotent — re-pressing an already-active button is a no-op, so a
     /// finger sliding within the button never re-emits.
-    pub(crate) fn on_press(&mut self, s: &State) -> Option<Action> {
-        let action = self.backend.on_press(s);
+    pub(crate) fn on_press(&mut self, store: &Store) -> Option<Action> {
+        let action = self.backend.on_press(store);
         if matches!(action, Some(Action::OpenModal(_))) {
             return action;
         }
@@ -280,13 +280,13 @@ impl Button {
     /// Release edge: clear the highlight (unless `sticky`) and return the
     /// backend's effect. Only acts when the button was actually active, so it
     /// never emits a stray key-up after the finger has already left.
-    pub(crate) fn on_release(&mut self, s: &State) -> Option<Action> {
+    pub(crate) fn on_release(&mut self, store: &Store) -> Option<Action> {
         if self.sticky || !self.active {
             return None;
         }
         self.active = false;
         self.changed = true;
-        let action = self.backend.on_release(s);
+        let action = self.backend.on_release(store);
         let key = match &action {
             Some(Action::Key(keys, _)) => keys.first().copied(),
             _ => None,
@@ -307,9 +307,9 @@ impl Button {
         c: &Context,
         config: &Config,
         region: &Region,
-        state: &State,
+        store: &Store,
         complete_redraw: bool,
-    ) -> Vec<ClipRect> {
+    ) -> Result<Vec<ClipRect>> {
         let radius = 8.0f64;
         let bot = (region.height as f64) * 0.15;
         let top = (region.height as f64) * 0.85;
@@ -325,7 +325,12 @@ impl Button {
         };
         if !complete_redraw {
             c.set_source_rgb(0.0, 0.0, 0.0);
-            c.rectangle(left_edge, bot - radius, button_width, top - bot + radius * 2.0);
+            c.rectangle(
+                left_edge,
+                bot - radius,
+                button_width,
+                top - bot + radius * 2.0,
+            );
             c.fill().unwrap();
         }
         self.set_background_color(c, color);
@@ -333,17 +338,41 @@ impl Button {
         c.new_sub_path();
         let left = left_edge + radius;
         let right = (left_edge + button_width.ceil()) - radius;
-        c.arc(right, bot, radius, (-90.0f64).to_radians(), (0.0f64).to_radians());
-        c.arc(right, top, radius, (0.0f64).to_radians(), (90.0f64).to_radians());
-        c.arc(left, top, radius, (90.0f64).to_radians(), (180.0f64).to_radians());
-        c.arc(left, bot, radius, (180.0f64).to_radians(), (270.0f64).to_radians());
+        c.arc(
+            right,
+            bot,
+            radius,
+            (-90.0f64).to_radians(),
+            (0.0f64).to_radians(),
+        );
+        c.arc(
+            right,
+            top,
+            radius,
+            (0.0f64).to_radians(),
+            (90.0f64).to_radians(),
+        );
+        c.arc(
+            left,
+            top,
+            radius,
+            (90.0f64).to_radians(),
+            (180.0f64).to_radians(),
+        );
+        c.arc(
+            left,
+            bot,
+            radius,
+            (180.0f64).to_radians(),
+            (270.0f64).to_radians(),
+        );
         c.close_path();
         c.fill().unwrap();
         c.set_source_rgb(1.0, 1.0, 1.0);
-        self.backend.draw_content(c, region, state);
+        self.backend.draw_content(c, region, store);
         self.changed = false;
 
-        if complete_redraw {
+        let clips = if complete_redraw {
             vec![]
         } else {
             vec![ClipRect::new(
@@ -352,6 +381,7 @@ impl Button {
                 region.height as u16 - bot as u16 + radius as u16,
                 left_edge as u16 + button_width as u16,
             )]
-        }
+        };
+        Ok(clips)
     }
 }

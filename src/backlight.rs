@@ -112,8 +112,8 @@ impl BacklightManager {
             Some(p) => (read_attr(p, "max_brightness"), read_attr(p, "brightness")),
             None => (MAX_TOUCH_BAR_BRIGHTNESS, MAX_TOUCH_BAR_BRIGHTNESS),
         };
-        // Display backlight write handle for the brightness slider, opened here
-        // (before the privilege drop) so the daemon can still write it as nobody.
+        // Display backlight write handle for the brightness slider, opened by the
+        // user-session daemon using udev/group-granted sysfs permissions.
         let display_bl_file = display_bl_path.as_ref().and_then(|p| {
             OpenOptions::new()
                 .write(true)

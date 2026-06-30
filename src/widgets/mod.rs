@@ -1,7 +1,7 @@
 //! Touch Bar widgets. Each widget kind lives in its own module; this root hosts
 //! the `Widget` enum (the *frame* — kind decides chrome / hit-eligibility) and
 //! the three backend traits (the *fill* — behavior within a kind). Every backend
-//! reads a shared `&State` to render and can only return an `Action` to act, so
+//! reads a shared `&Store` to render and can only return an `Action` to act, so
 //! the App stays the single effectful place.
 pub(crate) mod button;
 pub(crate) mod indicator;
@@ -17,7 +17,7 @@ use drm::control::ClipRect;
 use crate::action::Action;
 use crate::battery::find_battery_device;
 use crate::config::{ButtonConfig, Config};
-use crate::state::State;
+use crate::store::{StateKey, Store};
 use crate::widgets::button::KeyButton;
 use crate::widgets::indicator::{BatteryIndicator, ClockIndicator};
 
@@ -35,20 +35,20 @@ pub(crate) struct Region {
     pub(crate) y_shift: f64,
 }
 
-/// A backend that fills a [`Button`]: draws its content as a function of `&State`
+/// A backend that fills a [`Button`]: draws its content as a function of `&Store`
 /// and turns press/release edges into `Action`s. The `Button` struct owns the
 /// shared interaction UI (the highlight); the backend owns only behavior.
 pub(crate) trait ButtonBackend {
-    fn draw_content(&self, c: &Context, r: &Region, s: &State);
-    fn on_press(&mut self, s: &State) -> Option<Action>;
-    fn on_release(&mut self, s: &State) -> Option<Action>;
+    fn draw_content(&self, c: &Context, r: &Region, store: &Store);
+    fn on_press(&mut self, store: &Store) -> Option<Action>;
+    fn on_release(&mut self, store: &Store) -> Option<Action>;
 }
 
-/// A passive widget: renders content as a function of `&State` and owns its own
+/// A passive widget: renders content as a function of `&Store` and owns its own
 /// redraw cadence (clock-by-tick, battery-by-poll). No interaction UI.
 pub(crate) trait IndicatorBackend {
-    fn draw_content(&self, c: &Context, r: &Region, s: &State);
-    fn needs_redraw(&self, s: &State) -> bool;
+    fn draw_content(&self, c: &Context, r: &Region, store: &Store);
+    fn needs_redraw(&self, store: &Store) -> bool;
     fn is_clock(&self) -> bool {
         false
     }
@@ -65,9 +65,9 @@ pub(crate) trait IndicatorBackend {
         &self,
         c: &Context,
         region: &Region,
-        state: &State,
+        store: &Store,
         complete_redraw: bool,
-    ) -> Vec<ClipRect> {
+    ) -> Result<Vec<ClipRect>> {
         let radius = 8.0f64;
         let bot = (region.height as f64) * 0.15;
         let top = (region.height as f64) * 0.85;
@@ -76,12 +76,17 @@ pub(crate) trait IndicatorBackend {
 
         if !complete_redraw {
             c.set_source_rgb(0.0, 0.0, 0.0);
-            c.rectangle(left_edge, bot - radius, button_width, top - bot + radius * 2.0);
+            c.rectangle(
+                left_edge,
+                bot - radius,
+                button_width,
+                top - bot + radius * 2.0,
+            );
             c.fill().unwrap();
         }
-        self.draw_content(c, region, state);
+        self.draw_content(c, region, store);
 
-        if complete_redraw {
+        let clips = if complete_redraw {
             vec![]
         } else {
             vec![ClipRect::new(
@@ -90,16 +95,17 @@ pub(crate) trait IndicatorBackend {
                 region.height as u16 - bot as u16 + radius as u16,
                 left_edge as u16 + button_width as u16,
             )]
-        }
+        };
+        Ok(clips)
     }
 }
 
 /// The effect a [`Slider`] drives. Every slider grabs/drags/throttles/draws
 /// identically (the `Slider` struct), so the backend is just the effect: where
-/// the level goes, and where its initial value is read from `&State` on grab.
+/// the level goes, and which Store key supplies its level on grab.
 pub(crate) trait SliderBackend {
+    fn key(&self) -> StateKey;
     fn apply(&self, level: f64) -> Action;
-    fn initial_level(&self, s: &State) -> f64;
 }
 
 /// A widget occupying a cell. `Button`/`Slider` are interactive and own shared
@@ -153,11 +159,11 @@ impl Widget {
 
     /// Whether this widget changed since the last draw (always false for a
     /// passive `Spacer`). Indicators own their cadence via `needs_redraw`.
-    pub(crate) fn changed(&self, s: &State) -> bool {
+    pub(crate) fn changed(&self, store: &Store) -> bool {
         match self {
             Widget::Button(b) => b.changed,
             Widget::Slider(sl) => sl.changed,
-            Widget::Indicator(i) => i.needs_redraw(s),
+            Widget::Indicator(i) => i.needs_redraw(store),
             Widget::Spacer => false,
         }
     }
@@ -173,15 +179,22 @@ impl Widget {
         c: &Context,
         cfg: &Config,
         region: &Region,
-        state: &State,
+        store: &Store,
         width: i32,
         complete_redraw: bool,
-    ) -> Vec<ClipRect> {
+    ) -> Result<Vec<ClipRect>> {
         match self {
-            Widget::Button(b) => b.draw(c, cfg, region, state, complete_redraw),
-            Widget::Slider(s) => s.draw(c, width, region.height, complete_redraw),
-            Widget::Indicator(b) => b.draw(c, region, state, complete_redraw),
-            Widget::Spacer => vec![],
+            Widget::Button(b) => b.draw(c, cfg, region, store, complete_redraw),
+            Widget::Slider(s) => Ok(s.draw(c, width, region.height, complete_redraw)),
+            Widget::Indicator(b) => b.draw(c, region, store, complete_redraw),
+            Widget::Spacer => Ok(vec![]),
+        }
+    }
+
+    pub(crate) fn slider_key(&self) -> Option<StateKey> {
+        match self {
+            Widget::Slider(sl) => Some(sl.backend.key()),
+            _ => None,
         }
     }
 
@@ -193,4 +206,3 @@ impl Widget {
         matches!(self, Widget::Indicator(i) if i.is_clock())
     }
 }
-

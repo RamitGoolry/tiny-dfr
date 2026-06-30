@@ -1,9 +1,9 @@
 //! Keyboard-backlight LED control for the illumination slider. The same shape as
 //! the display backlight in `backlight.rs`: a sysfs `brightness`/`max_brightness`
-//! pair under `/sys/class/leds/*kbd_backlight*`. The write fd is opened as root in
-//! `real_main` (before the privilege drop) so the daemon can still write it as
-//! `nobody`. All fields are `Option`-tolerant so machines without the LED just
-//! disable the control instead of panicking.
+//! pair under `/sys/class/leds/*kbd_backlight*`. The write fd is opened by the
+//! user-session daemon using udev/group-granted sysfs permissions. All fields are
+//! `Option`-tolerant so machines without the LED just disable the control instead
+//! of panicking.
 use anyhow::{anyhow, Result};
 use std::{
     fs::{self, File, OpenOptions},
@@ -37,7 +37,7 @@ fn try_read_attr(path: &Path, attr: &str) -> Option<u32> {
 pub struct KbdBacklight {
     /// LED sysfs dir, kept for reading `brightness` fresh each `level()`.
     path: Option<PathBuf>,
-    /// Write handle to `brightness`, opened as root before the privilege drop.
+    /// Write handle to `brightness`, opened by the user-session daemon.
     file: Option<File>,
     max: u32,
 }
@@ -49,9 +49,12 @@ impl KbdBacklight {
                 eprintln!("No keyboard backlight LED, illumination control disabled: {e}")
             })
             .ok();
-        let file = path
-            .as_ref()
-            .and_then(|p| OpenOptions::new().write(true).open(p.join("brightness")).ok());
+        let file = path.as_ref().and_then(|p| {
+            OpenOptions::new()
+                .write(true)
+                .open(p.join("brightness"))
+                .ok()
+        });
         let max = path
             .as_ref()
             .and_then(|p| try_read_attr(p, "max_brightness"))

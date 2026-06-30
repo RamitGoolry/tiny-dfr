@@ -1,5 +1,5 @@
 use crate::action::Action;
-use crate::state::State;
+use crate::store::{key, StateKey};
 use crate::widgets::SliderBackend;
 use cairo::Context;
 use drm::control::ClipRect;
@@ -28,50 +28,61 @@ const SLIDER_TRACK_RGB: (f64, f64, f64) = (0.20, 0.20, 0.22);
 fn rounded_rect(c: &Context, x: f64, y: f64, w: f64, h: f64, r: f64) {
     let r = r.min(w / 2.0).min(h / 2.0).max(0.0);
     c.new_sub_path();
-    c.arc(x + w - r, y + r, r, (-90f64).to_radians(), 0f64.to_radians());
-    c.arc(x + w - r, y + h - r, r, 0f64.to_radians(), 90f64.to_radians());
+    c.arc(
+        x + w - r,
+        y + r,
+        r,
+        (-90f64).to_radians(),
+        0f64.to_radians(),
+    );
+    c.arc(
+        x + w - r,
+        y + h - r,
+        r,
+        0f64.to_radians(),
+        90f64.to_radians(),
+    );
     c.arc(x + r, y + h - r, r, 90f64.to_radians(), 180f64.to_radians());
     c.arc(x + r, y + r, r, 180f64.to_radians(), 270f64.to_radians());
     c.close_path();
 }
 
-/// Brightness slider effect: pushes the level to the display backlight and reads
-/// its initial value back from the App-owned `State` on grab.
+/// Brightness slider effect: pushes the level to the display backlight and binds
+/// its initial value to the App-owned Store on grab.
 pub(crate) struct BrightnessSlider;
 
 impl SliderBackend for BrightnessSlider {
+    fn key(&self) -> StateKey {
+        StateKey::new(key::HARDWARE_BRIGHTNESS).expect("built-in Store key must be valid")
+    }
     fn apply(&self, level: f64) -> Action {
         Action::SetBrightness(level)
-    }
-    fn initial_level(&self, s: &State) -> f64 {
-        s.brightness
     }
 }
 
 /// Keyboard-illumination slider effect: pushes the level to the keyboard
-/// backlight LED and reads its current value back from `State` on grab.
+/// backlight LED and binds its current value through the Store on grab.
 pub(crate) struct KbdIllumSlider;
 
 impl SliderBackend for KbdIllumSlider {
+    fn key(&self) -> StateKey {
+        StateKey::new(key::HARDWARE_KBD_ILLUM).expect("built-in Store key must be valid")
+    }
     fn apply(&self, level: f64) -> Action {
         Action::SetKbdIllum(level)
     }
-    fn initial_level(&self, s: &State) -> f64 {
-        s.kbd_illum
-    }
 }
 
-/// Volume slider effect: pushes the level to the ALSA Master mixer and reads its
-/// current value back from `State` on grab.
+/// Volume slider effect: pushes the level to PipeWire and binds its current value
+/// through the Store on grab.
 pub(crate) struct VolumeSlider;
 
 impl SliderBackend for VolumeSlider {
+    fn key(&self) -> StateKey {
+        StateKey::new(key::AUDIO_VOLUME).expect("built-in Store key must be valid")
+    }
     fn apply(&self, level: f64) -> Action {
         Action::SetVolume(level)
-    }
-    fn initial_level(&self, _s: &State) -> f64 {
-        // Read PipeWire live on grab (not from State) — see volume.rs.
-        crate::volume::current_level()
     }
 }
 

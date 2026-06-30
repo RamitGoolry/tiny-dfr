@@ -73,9 +73,9 @@ impl ContextListener {
         self.stream.is_some()
     }
 
-    /// Drain pending events. Returns `Some(class)` when the focused window changed
-    /// (class may be empty when focus moves to an empty workspace).
-    pub fn poll(&mut self) -> Option<String> {
+    /// Drain pending events. Returns `Some((class, title))` when the focused window
+    /// changed (class may be empty when focus moves to an empty workspace).
+    pub fn poll(&mut self) -> Option<(String, String)> {
         self.stream.as_ref()?;
         let mut tmp = [0u8; 4096];
         let mut disconnected = false;
@@ -101,7 +101,8 @@ impl ContextListener {
         if disconnected {
             self.stream = None;
         }
-        self.parse_lines().then(|| self.class.clone())
+        self.parse_lines()
+            .then(|| (self.class.clone(), self.title.clone()))
     }
 
     /// Parse complete lines out of `buf`; update class/title on `activewindow`.
