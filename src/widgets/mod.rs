@@ -154,6 +154,8 @@ impl Widget {
                     "Battery N/A".to_string(),
                     cfg.action,
                     cfg.open_layer.clone(),
+                    cfg.push_layer.clone(),
+                    cfg.pop_layer.unwrap_or(false),
                 );
                 Ok(Widget::Button(Button::new(Box::new(backend))))
             }

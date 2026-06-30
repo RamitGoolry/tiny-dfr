@@ -36,6 +36,9 @@ use crate::{dbg_ts, BUTTON_SPACING_PX, TIMEOUT_MS, TOUCH_ACTIVE_POLL_MS};
 
 const GLOBAL_LEFT_LAYER: &str = "global-left";
 const GLOBAL_RIGHT_LAYER: &str = "global-right";
+const GLOBAL_RIGHT_MEDIA_LAYER: &str = "global-right-media";
+const MEDIA_ACTIVE_LAYER: &str = "media-active";
+const MEDIA_OVERLAY_LAYER: &str = "media-overlay";
 
 pub(crate) struct AppGeometry {
     pub(crate) width: u16,
@@ -217,6 +220,21 @@ impl App {
     fn refresh_media(&mut self) -> Result<()> {
         if let Some(media) = self.mpris.refresh()? {
             self.store_media(media)?;
+        } else {
+            self.runtime
+                .set(key::MEDIA_ACTIVE_PLAYER, Value::Text(String::new()))?;
+            self.runtime
+                .set(key::MEDIA_ACTIVE_TRACK_ID, Value::Text(String::new()))?;
+            self.runtime
+                .set(key::MEDIA_ACTIVE_STATUS, Value::Text(String::new()))?;
+            self.runtime
+                .set(key::MEDIA_ACTIVE_TITLE, Value::Text(String::new()))?;
+            self.runtime
+                .set(key::MEDIA_ACTIVE_ART_URL, Value::Text(String::new()))?;
+            self.runtime
+                .set(key::MEDIA_ACTIVE_LENGTH, Value::Number(0.0))?;
+            self.runtime
+                .set(key::MEDIA_ACTIVE_POSITION, Value::Number(0.0))?;
         }
         Ok(())
     }
@@ -365,7 +383,7 @@ impl App {
             || self
                 .center_layer()
                 .is_some_and(|layer| self.store.get(layer).faster_refresh())
-            || self.store.get(GLOBAL_RIGHT_LAYER).faster_refresh()
+            || self.store.get(self.global_right_layer()).faster_refresh()
     }
 
     /// Per-iteration time trigger: when the active layer shows the clock, force a full
@@ -449,8 +467,13 @@ impl App {
         // Compact always-global edge controls. The app-control center gets the
         // remaining width instead of making Esc/Volume/Brightness full row cells.
         let global_button_width = (height * 3).clamp(140, 220);
+        let right_count = if self.should_show_global_media_button() {
+            3
+        } else {
+            2
+        };
         let left_width = global_button_width;
-        let right_width = global_button_width * 2 + BUTTON_SPACING_PX;
+        let right_width = global_button_width * right_count + BUTTON_SPACING_PX * (right_count - 1);
         let center_left = left_width as f64 + BUTTON_SPACING_PX as f64;
         let center_width = (width - left_width - right_width - BUTTON_SPACING_PX * 2).max(1);
         let right_left = (width - right_width) as f64;
@@ -475,9 +498,40 @@ impl App {
 
     fn center_layer(&self) -> Option<&str> {
         self.rstate
-            .app
-            .as_deref()
+            .substates
+            .last()
+            .map(String::as_str)
             .filter(|layer| self.store.registry.contains_key(*layer))
+            .or_else(|| {
+                self.rstate
+                    .app
+                    .as_deref()
+                    .filter(|layer| self.store.registry.contains_key(*layer))
+            })
+    }
+
+    fn media_available(&self) -> bool {
+        !self
+            .runtime
+            .text(key::MEDIA_ACTIVE_PLAYER)
+            .unwrap_or("")
+            .is_empty()
+    }
+
+    fn should_show_global_media_button(&self) -> bool {
+        self.media_available()
+            && !matches!(
+                self.center_layer(),
+                Some(MEDIA_ACTIVE_LAYER) | Some(MEDIA_OVERLAY_LAYER)
+            )
+    }
+
+    fn global_right_layer(&self) -> &'static str {
+        if self.should_show_global_media_button() {
+            GLOBAL_RIGHT_MEDIA_LAYER
+        } else {
+            GLOBAL_RIGHT_LAYER
+        }
     }
 
     fn frame_needs_redraw(&self, width: i32, height: i32) -> bool {
@@ -492,8 +546,12 @@ impl App {
                 .center_layer()
                 .is_some_and(|layer| self.store.get(layer).needs_redraw(&self.runtime))
             || self
+                .runtime
+                .is_dirty(key::MEDIA_ACTIVE_PLAYER)
+                .unwrap_or(false)
+            || self
                 .store
-                .get(GLOBAL_RIGHT_LAYER)
+                .get(self.global_right_layer())
                 .needs_redraw(&self.runtime)
     }
 
@@ -536,7 +594,8 @@ impl App {
                 self.needs_complete_redraw,
             )?);
         }
-        clips.extend(self.store.get_mut(GLOBAL_RIGHT_LAYER).draw_in(
+        let right_layer = self.global_right_layer();
+        clips.extend(self.store.get_mut(right_layer).draw_in(
             &self.cfg,
             right,
             &self.surface,
@@ -603,7 +662,7 @@ impl App {
         let (left, center, right) = self.bar_areas(self.width as i32, self.height as i32);
         if layer == GLOBAL_LEFT_LAYER {
             Some(left)
-        } else if layer == GLOBAL_RIGHT_LAYER {
+        } else if layer == self.global_right_layer() {
             Some(right)
         } else if self.center_layer() == Some(layer) {
             Some(center)
@@ -626,7 +685,7 @@ impl App {
         for layer in [
             Some(GLOBAL_LEFT_LAYER),
             self.center_layer(),
-            Some(GLOBAL_RIGHT_LAYER),
+            Some(self.global_right_layer()),
         ]
         .into_iter()
         .flatten()
@@ -658,8 +717,8 @@ impl App {
                         self.store
                             .get_mut(&active)
                             .on_press_at(btn, &self.runtime, area, x);
-                    // Modal and media scrub hand-offs record their own touch target;
-                    // everything else is a normal button press/release sequence.
+                    // Layer hand-offs and media scrub hand-offs manage their own
+                    // lifecycle; everything else is a normal button press/release sequence.
                     if matches!(action, Some(Action::MediaSeek(_))) {
                         self.touches.insert(
                             0,
@@ -668,7 +727,10 @@ impl App {
                                 btn,
                             },
                         );
-                    } else if !matches!(action, Some(Action::OpenModal(_))) {
+                    } else if !matches!(
+                        action,
+                        Some(Action::OpenModal(_) | Action::PushLayer(_) | Action::PopLayer)
+                    ) {
                         self.touches.insert(
                             0,
                             TouchTarget::Button {
@@ -793,6 +855,18 @@ impl App {
                 self.mpris.seek(position_us)?;
                 self.runtime
                     .set(key::MEDIA_ACTIVE_POSITION, Value::Number(position_us))?;
+            }
+            Action::PushLayer(layer) => {
+                self.rstate.modal = Some(layer);
+                self.needs_complete_redraw = true;
+            }
+            Action::PopLayer => {
+                if self.rstate.modal.is_some() {
+                    self.rstate.modal = None;
+                } else {
+                    self.rstate.substates.pop();
+                }
+                self.needs_complete_redraw = true;
             }
             Action::OpenModal(target) => {
                 let slider_key = self.store.get(&target).slider_key()?;

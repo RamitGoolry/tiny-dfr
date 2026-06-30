@@ -46,6 +46,10 @@ pub(crate) struct KeyButton {
     /// If set, pressing this button opens the named layer as a momentary modal
     /// (e.g. a slider) instead of sending its keys.
     open_layer: Option<String>,
+    /// If set, pressing this button opens the named full-bar transient layer.
+    push_layer: Option<String>,
+    /// If set, pressing this button closes the current transient layer.
+    pop_layer: bool,
 }
 
 fn try_load_svg(path: &str) -> Result<ButtonImage> {
@@ -138,15 +142,24 @@ pub(crate) fn try_load_image(
 }
 
 impl KeyButton {
-    pub(crate) fn new_text(text: String, keys: Vec<Key>, open_layer: Option<String>) -> KeyButton {
+    pub(crate) fn new_text(
+        text: String,
+        keys: Vec<Key>,
+        open_layer: Option<String>,
+        push_layer: Option<String>,
+        pop_layer: bool,
+    ) -> KeyButton {
         KeyButton {
             keys,
             content: ButtonImage::Text(text),
             icon_width: 0.0,
             icon_height: 0.0,
             open_layer,
+            push_layer,
+            pop_layer,
         }
     }
+    #[allow(clippy::too_many_arguments)]
     fn new_icon(
         path: impl AsRef<str>,
         theme: Option<impl AsRef<str>>,
@@ -154,6 +167,8 @@ impl KeyButton {
         icon_width: i32,
         icon_height: i32,
         open_layer: Option<String>,
+        push_layer: Option<String>,
+        pop_layer: bool,
     ) -> Result<KeyButton> {
         let content = try_load_image(path, theme, icon_width, icon_height)?;
         Ok(KeyButton {
@@ -162,6 +177,8 @@ impl KeyButton {
             icon_width: icon_width as f64,
             icon_height: icon_height as f64,
             open_layer,
+            push_layer,
+            pop_layer,
         })
     }
     fn render(
@@ -208,6 +225,10 @@ impl ButtonBackend for KeyButton {
     fn on_press(&mut self, _store: &Store) -> Option<Action> {
         if let Some(layer) = &self.open_layer {
             Some(Action::OpenModal(layer.clone()))
+        } else if let Some(layer) = &self.push_layer {
+            Some(Action::PushLayer(layer.clone()))
+        } else if self.pop_layer {
+            Some(Action::PopLayer)
         } else if self.keys.is_empty() {
             None
         } else {
@@ -215,7 +236,11 @@ impl ButtonBackend for KeyButton {
         }
     }
     fn on_release(&mut self, _store: &Store) -> Option<Action> {
-        if self.open_layer.is_some() || self.keys.is_empty() {
+        if self.open_layer.is_some()
+            || self.push_layer.is_some()
+            || self.pop_layer
+            || self.keys.is_empty()
+        {
             None
         } else {
             Some(Action::Key(self.keys.clone(), Edge::Release))
@@ -237,8 +262,10 @@ impl Button {
     /// up in [`crate::widgets::Widget::from_config`].
     pub(crate) fn from_config(cfg: ButtonConfig) -> Result<Button> {
         let open_layer = cfg.open_layer.clone();
+        let push_layer = cfg.push_layer.clone();
+        let pop_layer = cfg.pop_layer.unwrap_or(false);
         let backend = if let Some(text) = cfg.text {
-            KeyButton::new_text(text, cfg.action, open_layer)
+            KeyButton::new_text(text, cfg.action, open_layer, push_layer, pop_layer)
         } else {
             let icon = cfg
                 .icon
@@ -250,6 +277,8 @@ impl Button {
                 cfg.icon_width.unwrap_or(DEFAULT_ICON_SIZE),
                 cfg.icon_height.unwrap_or(DEFAULT_ICON_SIZE),
                 open_layer,
+                push_layer,
+                pop_layer,
             )?
         };
         Ok(Button::new(Box::new(backend)))
@@ -261,7 +290,10 @@ impl Button {
     /// finger sliding within the button never re-emits.
     pub(crate) fn on_press(&mut self, store: &Store) -> Option<Action> {
         let action = self.backend.on_press(store);
-        if matches!(action, Some(Action::OpenModal(_))) {
+        if matches!(
+            action,
+            Some(Action::OpenModal(_) | Action::PushLayer(_) | Action::PopLayer)
+        ) {
             return action;
         }
         if self.active {

@@ -104,6 +104,10 @@ pub struct ButtonConfig {
     /// Touching this button opens the named layer (e.g. a slider) as a
     /// momentary modal instead of sending a key.
     pub open_layer: Option<String>,
+    /// Touching this button opens a named full-bar transient overlay.
+    pub push_layer: Option<String>,
+    /// Touching this button closes the current transient overlay.
+    pub pop_layer: Option<bool>,
 }
 
 /// Unwrap a config field the merged base config is expected to define. A missing
@@ -188,6 +192,8 @@ fn load_config(width: u16) -> Result<(Config, LayerStore)> {
                     icon_width: None,
                     icon_height: None,
                     open_layer: None,
+                    push_layer: None,
+                    pop_layer: None,
                 },
             );
         }
@@ -209,9 +215,61 @@ fn load_config(width: u16) -> Result<(Config, LayerStore)> {
         icon_width: None,
         icon_height: None,
         open_layer: None,
+        push_layer: None,
+        pop_layer: None,
     }])
     .context("building the global-left layer")?;
-    let global_right_layer = FunctionLayer::with_config(vec![
+    let volume_button = ButtonConfig {
+        icon: Some("volume_up".into()),
+        text: None,
+        theme: None,
+        action: Vec::new(),
+        stretch: None,
+        time: None,
+        locale: None,
+        battery: None,
+        media: None,
+        icon_width: None,
+        icon_height: None,
+        open_layer: Some("volume".into()),
+        push_layer: None,
+        pop_layer: None,
+    };
+    let brightness_button = ButtonConfig {
+        icon: Some("brightness_high".into()),
+        text: None,
+        theme: None,
+        action: Vec::new(),
+        stretch: None,
+        time: None,
+        locale: None,
+        battery: None,
+        media: None,
+        icon_width: None,
+        icon_height: None,
+        open_layer: Some("brightness".into()),
+        push_layer: None,
+        pop_layer: None,
+    };
+    let global_right_layer = FunctionLayer::with_config(vec![volume_button, brightness_button])
+        .context("building the global-right layer")?;
+    let global_right_media_layer = FunctionLayer::with_config(vec![
+        ButtonConfig {
+            icon: Some("play_pause".into()),
+            text: None,
+            theme: None,
+            action: Vec::new(),
+            stretch: None,
+            time: None,
+            locale: None,
+            battery: None,
+            media: None,
+            icon_width: None,
+            icon_height: None,
+            open_layer: None,
+            push_layer: Some("media-overlay".into()),
+            pop_layer: None,
+        },
         ButtonConfig {
             icon: Some("volume_up".into()),
             text: None,
@@ -225,6 +283,8 @@ fn load_config(width: u16) -> Result<(Config, LayerStore)> {
             icon_width: None,
             icon_height: None,
             open_layer: Some("volume".into()),
+            push_layer: None,
+            pop_layer: None,
         },
         ButtonConfig {
             icon: Some("brightness_high".into()),
@@ -239,14 +299,53 @@ fn load_config(width: u16) -> Result<(Config, LayerStore)> {
             icon_width: None,
             icon_height: None,
             open_layer: Some("brightness".into()),
+            push_layer: None,
+            pop_layer: None,
         },
     ])
-    .context("building the global-right layer")?;
+    .context("building the global-right-media layer")?;
+    let media_overlay_layer = FunctionLayer::with_config(vec![
+        ButtonConfig {
+            icon: None,
+            text: None,
+            theme: None,
+            action: Vec::new(),
+            stretch: Some(16),
+            time: None,
+            locale: None,
+            battery: None,
+            media: Some("active".into()),
+            icon_width: None,
+            icon_height: None,
+            open_layer: None,
+            push_layer: None,
+            pop_layer: None,
+        },
+        ButtonConfig {
+            icon: None,
+            text: Some("×".into()),
+            theme: None,
+            action: Vec::new(),
+            stretch: Some(1),
+            time: None,
+            locale: None,
+            battery: None,
+            media: None,
+            icon_width: None,
+            icon_height: None,
+            open_layer: None,
+            push_layer: None,
+            pop_layer: Some(true),
+        },
+    ])
+    .context("building the media-overlay layer")?;
     let mut registry = HashMap::new();
     registry.insert("media".to_string(), media_layer);
     registry.insert("fkeys".to_string(), fkey_layer);
     registry.insert("global-left".to_string(), global_left_layer);
     registry.insert("global-right".to_string(), global_right_layer);
+    registry.insert("global-right-media".to_string(), global_right_media_layer);
+    registry.insert("media-overlay".to_string(), media_overlay_layer);
     for (name, layer) in base.layers.take().unwrap_or_default() {
         registry.insert(
             name.clone(),

@@ -29,6 +29,10 @@ pub(crate) enum Action {
     MediaNext,
     /// Seek the active MPRIS player to an absolute position in microseconds.
     MediaSeek(f64),
+    /// Open a named layer as a full-bar transient overlay.
+    PushLayer(String),
+    /// Close the current transient layer and return to the previous bar state.
+    PopLayer,
     /// Enter the named layer as a momentary modal (e.g. a slider).
     OpenModal(String),
     /// Leave the current modal layer.
