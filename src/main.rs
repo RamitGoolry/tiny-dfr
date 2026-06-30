@@ -30,7 +30,6 @@ mod input;
 mod kbd_backlight;
 mod layer;
 mod pixel_shift;
-mod state;
 mod store;
 mod touch;
 mod volume;
@@ -163,18 +162,21 @@ fn real_main(drm: &mut DrmBackend) {
     }
 
     loop {
-        app.handle(AppEvent::ConfigReload, &mut cfg_mgr);
+        handle_app_event(&mut app, AppEvent::ConfigReload, &mut cfg_mgr, drm);
         app.resolve_and_log();
 
         let touch_down = touch_reader.as_ref().is_some_and(|r| r.is_down());
         let next_timeout_ms = app.next_timeout(touch_down);
 
-        // The world the widgets render from, snapshotted once per iteration and
-        // threaded into both the draw and the touch dispatch.
-        let state = app.state();
+        if let Err(e) = app.refresh_sources() {
+            eprintln!("source refresh failed: {e:#}");
+            let _ = app.render_error(drm, &e);
+        }
 
-        app.handle(AppEvent::Tick, &mut cfg_mgr);
-        app.render(drm, &state);
+        handle_app_event(&mut app, AppEvent::Tick, &mut cfg_mgr, drm);
+        if let Err(e) = app.render(drm) {
+            eprintln!("render fallback failed: {e:#}");
+        }
 
         match epoll.wait(
             &mut [EpollEvent::new(EpollFlags::EPOLLIN, 0)],
@@ -192,7 +194,7 @@ fn real_main(drm: &mut DrmBackend) {
         let mut n_events = 0u32;
         for event in &mut input_main.clone() {
             n_events += 1;
-            app.handle(AppEvent::Libinput(event), &mut cfg_mgr);
+            handle_app_event(&mut app, AppEvent::Libinput(event), &mut cfg_mgr, drm);
         }
         let t_drain = t_in.elapsed();
         // Only log when the input path itself is slow, to catch the stall bursts.
@@ -215,13 +217,18 @@ fn real_main(drm: &mut DrmBackend) {
                 samples.push(up);
             }
             for s in samples {
-                app.handle(AppEvent::Touch(s), &mut cfg_mgr);
+                handle_app_event(&mut app, AppEvent::Touch(s), &mut cfg_mgr, drm);
             }
         }
 
         // ----- Hyprland focused-window context -> app-aware layer (context.rs).
         if let Some((class, title)) = context.poll() {
-            app.handle(AppEvent::FocusChanged { class, title }, &mut cfg_mgr);
+            handle_app_event(
+                &mut app,
+                AppEvent::FocusChanged { class, title },
+                &mut cfg_mgr,
+                drm,
+            );
         }
         // Reconnect if Hyprland went away (e.g. compositor restart) and re-register.
         if !context.is_connected() && context.reconnect() {
@@ -230,5 +237,17 @@ fn real_main(drm: &mut DrmBackend) {
             }
         }
         app.update_backlight();
+    }
+}
+
+fn handle_app_event(
+    app: &mut App,
+    event: AppEvent,
+    cfg_mgr: &mut ConfigManager,
+    drm: &mut DrmBackend,
+) {
+    if let Err(e) = app.handle(event, cfg_mgr) {
+        eprintln!("app event failed: {e:#}");
+        let _ = app.render_error(drm, &e);
     }
 }

@@ -7,7 +7,7 @@ use chrono::{
 use librsvg_rebind::{prelude::HandleExt, Handle, Rectangle};
 
 use crate::battery::{get_battery_state, BatteryIconMode, BatteryImages, BatteryState};
-use crate::state::State;
+use crate::store::Store;
 use crate::widgets::button::try_load_image;
 use crate::widgets::{IndicatorBackend, Region};
 use crate::DEFAULT_ICON_SIZE;
@@ -45,7 +45,7 @@ impl ClockIndicator {
 }
 
 impl IndicatorBackend for ClockIndicator {
-    fn draw_content(&self, c: &Context, r: &Region, _s: &State) {
+    fn draw_content(&self, c: &Context, r: &Region, _store: &Store) {
         c.set_source_rgb(1.0, 1.0, 1.0);
         let current_time = Local::now();
         let formatted_time = current_time
@@ -58,7 +58,7 @@ impl IndicatorBackend for ClockIndicator {
         );
         c.show_text(&formatted_time).unwrap();
     }
-    fn needs_redraw(&self, _s: &State) -> bool {
+    fn needs_redraw(&self, _store: &Store) -> bool {
         false
     }
     fn is_clock(&self) -> bool {
@@ -159,7 +159,7 @@ impl BatteryIndicator {
 }
 
 impl IndicatorBackend for BatteryIndicator {
-    fn draw_content(&self, c: &Context, r: &Region, _s: &State) {
+    fn draw_content(&self, c: &Context, r: &Region, _store: &Store) {
         self.set_content_color(c);
         let height = r.height;
         let button_left_edge = r.left;
@@ -231,7 +231,7 @@ impl IndicatorBackend for BatteryIndicator {
             c.show_text(&percent_str).unwrap();
         }
     }
-    fn needs_redraw(&self, _s: &State) -> bool {
+    fn needs_redraw(&self, _store: &Store) -> bool {
         true
     }
 }

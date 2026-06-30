@@ -5,7 +5,7 @@ use drm::control::ClipRect;
 use crate::action::Action;
 use crate::config::{ButtonConfig, Config};
 use crate::pixel_shift::PIXEL_SHIFT_WIDTH_PX;
-use crate::state::State;
+use crate::store::{StateKey, Store};
 use crate::widgets::{Cell, Region, Slider, SliderBackend, Widget};
 use crate::{dbg_ts, BUTTON_SPACING_PX};
 
@@ -66,29 +66,33 @@ impl FunctionLayer {
         self.displays_time
     }
     /// Whether anything in this layer needs repainting given the current state.
-    pub(crate) fn needs_redraw(&self, state: &State) -> bool {
-        self.cells.iter().any(|c| c.widget.changed(state))
+    pub(crate) fn needs_redraw(&self, store: &Store) -> bool {
+        self.cells.iter().any(|c| c.widget.changed(store))
     }
     /// Press the interactive widget in cell `i`, returning its effect (if any).
-    pub(crate) fn on_press(&mut self, i: usize, state: &State) -> Option<Action> {
+    pub(crate) fn on_press(&mut self, i: usize, store: &Store) -> Option<Action> {
         match self.cells.get_mut(i).map(|c| &mut c.widget) {
-            Some(Widget::Button(b)) => b.on_press(state),
+            Some(Widget::Button(b)) => b.on_press(store),
             _ => None,
         }
     }
     /// Release the interactive widget in cell `i`, returning its effect (if any).
-    pub(crate) fn on_release(&mut self, i: usize, state: &State) -> Option<Action> {
+    pub(crate) fn on_release(&mut self, i: usize, store: &Store) -> Option<Action> {
         match self.cells.get_mut(i).map(|c| &mut c.widget) {
-            Some(Widget::Button(b)) => b.on_release(state),
+            Some(Widget::Button(b)) => b.on_release(store),
             _ => None,
         }
     }
-    /// Anchor this layer's slider at the current touch, reading its initial level
-    /// from `State` via the backend.
-    pub(crate) fn grab_slider(&mut self, state: &State, x: f64) {
+    pub(crate) fn slider_key(&self) -> Result<StateKey> {
+        self.cells
+            .iter()
+            .find_map(|cell| cell.widget.slider_key())
+            .ok_or_else(|| anyhow!("layer has no slider"))
+    }
+    /// Anchor this layer's slider at the current touch.
+    pub(crate) fn grab_slider(&mut self, level: f64, x: f64) {
         for cell in &mut self.cells {
             if let Widget::Slider(sl) = &mut cell.widget {
-                let level = sl.backend.initial_level(state);
                 sl.grab(x, level);
                 return;
             }
@@ -113,6 +117,7 @@ impl FunctionLayer {
             }
         }
     }
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn draw(
         &mut self,
         config: &Config,
@@ -120,10 +125,10 @@ impl FunctionLayer {
         height: i32,
         surface: &Surface,
         pixel_shift: (f64, f64),
-        state: &State,
+        store: &Store,
         complete_redraw: bool,
-    ) -> Vec<ClipRect> {
-        let c = Context::new(surface).unwrap();
+    ) -> Result<Vec<ClipRect>> {
+        let c = Context::new(surface)?;
         let mut modified_regions = if complete_redraw {
             vec![ClipRect::new(0, 0, height as u16, width as u16)]
         } else {
@@ -153,7 +158,7 @@ impl FunctionLayer {
         for cell in &mut self.cells {
             let end = start + cell.stretch;
 
-            if !cell.widget.changed(state) && !complete_redraw {
+            if !cell.widget.changed(store) && !complete_redraw {
                 start = end;
                 continue;
             };
@@ -177,14 +182,14 @@ impl FunctionLayer {
                 &c,
                 config,
                 &region,
-                state,
+                store,
                 width,
                 complete_redraw,
-            ));
+            )?);
             start = end;
         }
 
-        modified_regions
+        Ok(modified_regions)
     }
 
     pub(crate) fn hit(
