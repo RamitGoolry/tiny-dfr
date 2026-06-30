@@ -12,6 +12,7 @@ const PLAYER_IFACE: &str = "org.mpris.MediaPlayer2.Player";
 pub(crate) struct MediaState {
     pub(crate) player: String,
     pub(crate) status: String,
+    pub(crate) title: String,
     pub(crate) art_url: String,
     pub(crate) length_us: f64,
     pub(crate) position_us: f64,
@@ -108,6 +109,10 @@ fn read_player(conn: &Connection, player: &str) -> Result<MediaState> {
     let status: String = proxy.get_property("PlaybackStatus").unwrap_or_default();
     let position_us: i64 = proxy.get_property("Position").unwrap_or_default();
     let metadata: HashMap<String, OwnedValue> = proxy.get_property("Metadata").unwrap_or_default();
+    let title = metadata
+        .get("xesam:title")
+        .and_then(|value| String::try_from(value.clone()).ok())
+        .unwrap_or_default();
     let art_url = metadata
         .get("mpris:artUrl")
         .and_then(|value| String::try_from(value.clone()).ok())
@@ -120,6 +125,7 @@ fn read_player(conn: &Connection, player: &str) -> Result<MediaState> {
     Ok(MediaState {
         player: player.to_string(),
         status,
+        title,
         art_url,
         length_us: length_us.max(0) as f64,
         position_us: position_us.max(0) as f64,

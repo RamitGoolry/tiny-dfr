@@ -118,6 +118,9 @@ impl App {
             .set(key::MEDIA_ACTIVE_STATUS, Value::Text(String::new()))
             .expect("built-in Store key must be valid");
         runtime
+            .set(key::MEDIA_ACTIVE_TITLE, Value::Text(String::new()))
+            .expect("built-in Store key must be valid");
+        runtime
             .set(key::MEDIA_ACTIVE_ART_URL, Value::Text(String::new()))
             .expect("built-in Store key must be valid");
         runtime
@@ -220,6 +223,8 @@ impl App {
             .set(key::MEDIA_ACTIVE_PLAYER, Value::Text(media.player))?;
         self.runtime
             .set(key::MEDIA_ACTIVE_STATUS, Value::Text(media.status))?;
+        self.runtime
+            .set(key::MEDIA_ACTIVE_TITLE, Value::Text(media.title))?;
         self.runtime
             .set(key::MEDIA_ACTIVE_ART_URL, Value::Text(media.art_url))?;
         self.runtime

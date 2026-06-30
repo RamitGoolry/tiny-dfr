@@ -8,8 +8,8 @@ use crate::config::Config;
 use crate::store::{key, Store};
 use crate::widgets::Region;
 
-const ART_FRAC: f64 = 0.72;
-const CONTROL_FRAC: f64 = 0.30;
+const ART_FRAC: f64 = 0.84;
+const CONTROL_FRAC: f64 = 0.34;
 const GAP: f64 = 14.0;
 const CONTROL_GAP: f64 = 2.0;
 
@@ -35,6 +35,7 @@ impl MediaWidget {
 
     pub(crate) fn needs_redraw(&self, store: &Store) -> bool {
         self.changed
+            || store.is_dirty(key::MEDIA_ACTIVE_TITLE).unwrap_or(false)
             || store.is_dirty(key::MEDIA_ACTIVE_ART_URL).unwrap_or(false)
             || store.is_dirty(key::MEDIA_ACTIVE_POSITION).unwrap_or(false)
             || store.is_dirty(key::MEDIA_ACTIVE_LENGTH).unwrap_or(false)
@@ -75,7 +76,7 @@ impl MediaWidget {
 
     fn layout(&self, region: &Region) -> (f64, (f64, f64), [(f64, f64); 3]) {
         let art_size = (region.height as f64 * ART_FRAC).min(region.width * 0.22);
-        let control_w = (region.height as f64 * CONTROL_FRAC).max(104.0);
+        let control_w = (region.height as f64 * CONTROL_FRAC).max(116.0);
         let controls_total = control_w * 3.0 + CONTROL_GAP * 2.0;
         let controls_start = region.left + region.width - controls_total;
         let art_left = region.left;
@@ -178,14 +179,53 @@ impl MediaWidget {
         } else {
             0.0
         };
-        let w = (right - left).max(1.0);
-        let h = region.height as f64 * 0.18;
-        let y = (region.height as f64 - h) / 2.0 + region.y_shift;
-        c.set_source_rgb(0.20, 0.20, 0.22);
-        rounded_rect(c, left, y, w, h, h / 2.0);
+        let label = format_time_pair(pos, length);
+        c.set_source_rgb(1.0, 1.0, 1.0);
+        c.set_font_size(24.0);
+        let ext = c.text_extents(&label)?;
+        let label_x = left;
+        let label_y = region.y_shift + (region.height as f64 / 2.0 + ext.height() / 2.0).round();
+        c.move_to(label_x, label_y);
+        c.show_text(&label)?;
+
+        let bar_left = left + ext.width() + 14.0;
+        let w = (right - bar_left).max(1.0);
+        let radius = 8.0;
+        let bot = region.height as f64 * 0.15;
+        let top = region.height as f64 * 0.85;
+        let y = bot - radius + region.y_shift;
+        let h = top - bot + radius * 2.0;
+
+        c.set_source_rgb(0.0, 0.0, 0.0);
+        rounded_rect(c, bar_left, y, w, h, radius);
         c.fill()?;
-        c.set_source_rgb(0.20, 0.55, 1.0);
-        rounded_rect(c, left, y, w * pct, h, h / 2.0);
+        c.set_source_rgb(0.55, 0.55, 0.58);
+        c.set_line_width(1.5);
+        rounded_rect(c, bar_left + 0.75, y + 0.75, w - 1.5, h - 1.5, radius);
+        c.stroke()?;
+
+        let title = store.text(key::MEDIA_ACTIVE_TITLE).unwrap_or("");
+        if !title.is_empty() {
+            c.save()?;
+            c.rectangle(bar_left + 10.0, y, (w - 20.0).max(1.0), h);
+            c.clip();
+            c.set_source_rgb(0.28, 0.28, 0.30);
+            c.set_font_size(26.0);
+            let title_ext = c.text_extents(title)?;
+            c.move_to(
+                bar_left + ((w - title_ext.width()) / 2.0).max(12.0).round(),
+                y + (h / 2.0 + title_ext.height() / 2.0).round(),
+            );
+            c.show_text(title)?;
+            c.restore()?;
+        }
+
+        let thumb_w = 7.0;
+        let thumb_h = h * 0.82;
+        let thumb_x = (bar_left + w * pct - thumb_w / 2.0).clamp(bar_left, bar_left + w - thumb_w);
+        let thumb_y = y + (h - thumb_h) / 2.0;
+        c.set_source_rgb(0.95, 0.95, 0.96);
+        rounded_rect(c, thumb_x, thumb_y, thumb_w, thumb_h, thumb_w / 2.0);
         c.fill()?;
         Ok(())
     }
@@ -280,6 +320,28 @@ fn draw_triangle(c: &Context, x: f64, y: f64, width: f64, height: f64) -> Result
     c.close_path();
     c.fill()?;
     Ok(())
+}
+
+fn format_time_pair(position_us: f64, length_us: f64) -> String {
+    let position = (position_us / 1_000_000.0).max(0.0).round() as u64;
+    let length = (length_us / 1_000_000.0).max(0.0).round() as u64;
+    let with_hours = position >= 3600 || length >= 3600;
+    format!(
+        "{}/{}",
+        format_time(position, with_hours),
+        format_time(length, with_hours)
+    )
+}
+
+fn format_time(seconds: u64, with_hours: bool) -> String {
+    let h = seconds / 3600;
+    let m = (seconds % 3600) / 60;
+    let s = seconds % 60;
+    if with_hours {
+        format!("{h:02}:{m:02}:{s:02}")
+    } else {
+        format!("{m:02}:{s:02}")
+    }
 }
 
 fn file_url_to_path(url: &str) -> Option<String> {
