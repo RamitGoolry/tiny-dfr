@@ -14,9 +14,21 @@ use serde::{
     de::{self, Visitor},
     Deserialize, Deserializer,
 };
-use std::{collections::HashMap, fmt, fs::read_to_string, io::ErrorKind, os::fd::AsFd};
+use std::{
+    collections::HashMap,
+    env,
+    fmt,
+    fs::read_to_string,
+    io::ErrorKind,
+    os::fd::AsFd,
+    path::PathBuf,
+};
 
-const USER_CFG_PATH: &str = "/etc/tiny-dfr/config.toml";
+const USER_CFG_REL_PATH: &str = ".config/tiny-dfr/config.toml";
+
+fn user_cfg_path() -> Option<PathBuf> {
+    env::var_os("HOME").map(|home| PathBuf::from(home).join(USER_CFG_REL_PATH))
+}
 
 pub struct Config {
     pub show_button_outlines: bool,
@@ -124,25 +136,30 @@ fn load_config(width: u16) -> Result<(Config, LayerStore)> {
     // A user config is optional (absence is normal), but if one exists it must
     // parse — surfacing the error rejects the reload and keeps the running config,
     // rather than silently reverting to the shipped defaults.
-    match read_to_string(USER_CFG_PATH) {
-        Ok(user_str) => {
-            let user = toml::from_str::<ConfigProxy>(&user_str)
-                .with_context(|| format!("parsing {USER_CFG_PATH}"))?;
-            base.media_layer_default = user.media_layer_default.or(base.media_layer_default);
-            base.show_button_outlines = user.show_button_outlines.or(base.show_button_outlines);
-            base.enable_pixel_shift = user.enable_pixel_shift.or(base.enable_pixel_shift);
-            base.font_template = user.font_template.or(base.font_template);
-            base.adaptive_brightness = user.adaptive_brightness.or(base.adaptive_brightness);
-            base.media_layer_keys = user.media_layer_keys.or(base.media_layer_keys);
-            base.primary_layer_keys = user.primary_layer_keys.or(base.primary_layer_keys);
-            base.active_brightness = user.active_brightness.or(base.active_brightness);
-            base.double_press_switch_layers = user
-                .double_press_switch_layers
-                .or(base.double_press_switch_layers);
-            base.app_layers = user.app_layers.or(base.app_layers);
+    if let Some(user_cfg_path) = user_cfg_path() {
+        match read_to_string(&user_cfg_path) {
+            Ok(user_str) => {
+                let user = toml::from_str::<ConfigProxy>(&user_str)
+                    .with_context(|| format!("parsing {}", user_cfg_path.display()))?;
+                base.media_layer_default = user.media_layer_default.or(base.media_layer_default);
+                base.show_button_outlines = user.show_button_outlines.or(base.show_button_outlines);
+                base.enable_pixel_shift = user.enable_pixel_shift.or(base.enable_pixel_shift);
+                base.font_template = user.font_template.or(base.font_template);
+                base.adaptive_brightness = user.adaptive_brightness.or(base.adaptive_brightness);
+                base.media_layer_keys = user.media_layer_keys.or(base.media_layer_keys);
+                base.primary_layer_keys = user.primary_layer_keys.or(base.primary_layer_keys);
+                base.active_brightness = user.active_brightness.or(base.active_brightness);
+                base.double_press_switch_layers = user
+                    .double_press_switch_layers
+                    .or(base.double_press_switch_layers);
+                base.app_layers = user.app_layers.or(base.app_layers);
+            }
+            Err(e) if e.kind() == ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(anyhow::Error::from(e)
+                    .context(format!("reading {}", user_cfg_path.display())))
+            }
         }
-        Err(e) if e.kind() == ErrorKind::NotFound => {}
-        Err(e) => return Err(anyhow::Error::from(e).context(format!("reading {USER_CFG_PATH}"))),
     }
     let mut media_layer_keys = require(base.media_layer_keys.take(), "MediaLayerKeys")?;
     let mut primary_layer_keys = require(base.primary_layer_keys.take(), "PrimaryLayerKeys")?;
@@ -219,14 +236,18 @@ pub struct ConfigManager {
 }
 
 fn arm_inotify(inotify_fd: &Inotify) -> Option<WatchDescriptor> {
+    let path = user_cfg_path()?;
     let flags = AddWatchFlags::IN_MOVED_TO | AddWatchFlags::IN_CLOSE | AddWatchFlags::IN_ONESHOT;
-    match inotify_fd.add_watch(USER_CFG_PATH, flags) {
+    match inotify_fd.add_watch(&path, flags) {
         Ok(wd) => Some(wd),
         // The config file not existing yet is normal — there's just nothing to
         // watch. Any other error disables live reload rather than crashing.
         Err(Errno::ENOENT) => None,
         Err(e) => {
-            eprintln!("failed to watch {USER_CFG_PATH}, live config reload disabled: {e}");
+            eprintln!(
+                "failed to watch {}, live config reload disabled: {e}",
+                path.display()
+            );
             None
         }
     }
