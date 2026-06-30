@@ -20,6 +20,7 @@ use std::{
 
 use crate::action::{Action, Edge};
 use crate::backlight::BacklightManager;
+use crate::chromium::{ChromiumClient, ChromiumTabsState};
 use crate::config::{Config, ConfigManager};
 use crate::display::DrmBackend;
 use crate::event::AppEvent;
@@ -37,8 +38,10 @@ use crate::{dbg_ts, BUTTON_SPACING_PX, TIMEOUT_MS, TOUCH_ACTIVE_POLL_MS};
 const GLOBAL_LEFT_LAYER: &str = "global-left";
 const GLOBAL_RIGHT_LAYER: &str = "global-right";
 const GLOBAL_RIGHT_MEDIA_LAYER: &str = "global-right-media";
+const GLOBAL_RIGHT_TABS_LAYER: &str = "global-right-tabs";
 const MEDIA_ACTIVE_LAYER: &str = "media-active";
 const MEDIA_OVERLAY_LAYER: &str = "media-overlay";
+const CHROMIUM_TABS_LAYER: &str = "chromium-tabs";
 
 pub(crate) struct AppGeometry {
     pub(crate) width: u16,
@@ -61,6 +64,7 @@ pub(crate) struct App {
     /// PipeWire default sink volume, driven by the volume slider.
     volume: VolumeMixer,
     mpris: MprisClient,
+    chromium: ChromiumClient,
     uinput: UInputHandle<File>,
     cfg: Config,
     width: u16,
@@ -75,6 +79,36 @@ pub(crate) struct App {
     last_redraw_ts: u32,
     /// Timestamp of the last Fn press, for the double-press layer-swap timing.
     last: Instant,
+}
+
+fn media_is_chromium(player: &str) -> bool {
+    let player = player.to_ascii_lowercase();
+    player.contains("chromium") || player.contains("chrome")
+}
+
+fn titles_probably_match(media_title: &str, focused_title: &str) -> bool {
+    let media = normalize_media_title(media_title);
+    let focused = normalize_media_title(focused_title);
+    !media.is_empty()
+        && !focused.is_empty()
+        && (focused.contains(&media) || media.contains(&focused))
+}
+
+fn normalize_media_title(title: &str) -> String {
+    let mut title = title.trim();
+    // Chromium titles often start with notification counts like "(695) YouTube".
+    if let Some(rest) = title.strip_prefix('(') {
+        if let Some((digits, after)) = rest.split_once(')') {
+            if !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()) {
+                title = after.trim_start();
+            }
+        }
+    }
+    title
+        .trim_end_matches(" - YouTube")
+        .trim_end_matches(" – YouTube")
+        .trim_end_matches(" — YouTube")
+        .to_ascii_lowercase()
 }
 
 impl App {
@@ -98,6 +132,7 @@ impl App {
         // In-process PipeWire volume via wpctl (see volume.rs); spawns its apply thread.
         let volume = VolumeMixer::new();
         let mpris = MprisClient::new();
+        let chromium = ChromiumClient::new(None);
         let mut runtime = Store::new();
         runtime
             .set(
@@ -134,6 +169,21 @@ impl App {
             .expect("built-in Store key must be valid");
         runtime
             .set(key::MEDIA_ACTIVE_POSITION, Value::Number(0.0))
+            .expect("built-in Store key must be valid");
+        runtime
+            .set(key::CHROMIUM_MEDIA_ACTIVE, Value::Bool(false))
+            .expect("built-in Store key must be valid");
+        runtime
+            .set(key::CHROMIUM_TABS_AVAILABLE, Value::Bool(false))
+            .expect("built-in Store key must be valid");
+        runtime
+            .set(key::CHROMIUM_TABS_JSON, Value::Text("[]".to_string()))
+            .expect("built-in Store key must be valid");
+        runtime
+            .set(key::CHROMIUM_TABS_COUNT, Value::Number(0.0))
+            .expect("built-in Store key must be valid");
+        runtime
+            .set(key::CHROMIUM_TABS_ACTIVE_INDEX, Value::Number(-1.0))
             .expect("built-in Store key must be valid");
         runtime.clear_dirty();
 
@@ -192,6 +242,7 @@ impl App {
             kbd,
             volume,
             mpris,
+            chromium,
             uinput,
             cfg,
             width: geometry.width,
@@ -213,7 +264,13 @@ impl App {
         )?;
         self.runtime
             .set(key::HARDWARE_KBD_ILLUM, Value::Number(self.kbd.level()))?;
+        let old_center = self.center_layer().map(str::to_string);
+        let old_right = self.global_right_layer();
         self.refresh_media()?;
+        self.refresh_chromium_tabs(false)?;
+        if old_center.as_deref() != self.center_layer() || old_right != self.global_right_layer() {
+            self.needs_complete_redraw = true;
+        }
         Ok(())
     }
 
@@ -235,11 +292,44 @@ impl App {
                 .set(key::MEDIA_ACTIVE_LENGTH, Value::Number(0.0))?;
             self.runtime
                 .set(key::MEDIA_ACTIVE_POSITION, Value::Number(0.0))?;
+            self.runtime
+                .set(key::CHROMIUM_MEDIA_ACTIVE, Value::Bool(false))?;
         }
         Ok(())
     }
 
+    fn refresh_chromium_tabs(&mut self, force: bool) -> Result<()> {
+        let focused_title = self
+            .runtime
+            .text(key::CONTEXT_FOCUS_TITLE)
+            .unwrap_or("")
+            .to_string();
+        let state = match self.chromium.refresh_tabs(&focused_title, force) {
+            Ok(state) => state,
+            Err(err) => {
+                eprintln!("chromium: {err:#}");
+                self.chromium.unavailable_state()
+            }
+        };
+        self.store_chromium_tabs(state)
+    }
+
+    fn store_chromium_tabs(&mut self, state: ChromiumTabsState) -> Result<()> {
+        self.runtime
+            .set(key::CHROMIUM_TABS_AVAILABLE, Value::Bool(state.available))?;
+        self.runtime
+            .set(key::CHROMIUM_TABS_JSON, Value::Text(state.tabs_json))?;
+        self.runtime
+            .set(key::CHROMIUM_TABS_COUNT, Value::Number(state.count as f64))?;
+        self.runtime.set(
+            key::CHROMIUM_TABS_ACTIVE_INDEX,
+            Value::Number(state.active_index.map(|idx| idx as f64).unwrap_or(-1.0)),
+        )?;
+        Ok(())
+    }
+
     fn store_media(&mut self, media: MediaState) -> Result<()> {
+        let chromium_media_active = media_is_chromium(&media.player);
         self.runtime
             .set(key::MEDIA_ACTIVE_PLAYER, Value::Text(media.player))?;
         self.runtime
@@ -254,6 +344,10 @@ impl App {
             .set(key::MEDIA_ACTIVE_LENGTH, Value::Number(media.length_us))?;
         self.runtime
             .set(key::MEDIA_ACTIVE_POSITION, Value::Number(media.position_us))?;
+        self.runtime.set(
+            key::CHROMIUM_MEDIA_ACTIVE,
+            Value::Bool(chromium_media_active),
+        )?;
         Ok(())
     }
 
@@ -283,6 +377,8 @@ impl App {
     /// `app_layers` config) and let it take precedence over the base layers. An
     /// unmapped class clears `app`, falling back to the base layer.
     pub(crate) fn on_focus(&mut self, class: &str, title: &str) {
+        let old_center = self.center_layer().map(str::to_string);
+        let old_right = self.global_right_layer();
         self.runtime
             .set(key::CONTEXT_FOCUS_CLASS, Value::Text(class.to_string()))
             .expect("built-in Store key must be valid");
@@ -296,6 +392,8 @@ impl App {
                 dbg_ts()
             );
             self.rstate.app = new_app;
+        }
+        if old_center.as_deref() != self.center_layer() || old_right != self.global_right_layer() {
             self.needs_complete_redraw = true;
         }
     }
@@ -468,10 +566,10 @@ impl App {
         // remaining width instead of making Esc/Volume/Brightness full row cells.
         let global_button_width = ((height as f64) * 2.5).round() as i32;
         let global_button_width = global_button_width.clamp(120, 190);
-        let right_count = if self.should_show_global_media_button() {
-            3
-        } else {
+        let right_count = if self.global_right_layer() == GLOBAL_RIGHT_LAYER {
             2
+        } else {
+            3
         };
         let left_width = global_button_width;
         let right_width = global_button_width * right_count + BUTTON_SPACING_PX * (right_count - 1);
@@ -504,11 +602,49 @@ impl App {
             .map(String::as_str)
             .filter(|layer| self.store.registry.contains_key(*layer))
             .or_else(|| {
-                self.rstate
-                    .app
-                    .as_deref()
-                    .filter(|layer| self.store.registry.contains_key(*layer))
+                if self.is_chromium_focused() {
+                    if self.chromium_media_on_focused_tab() {
+                        self.store
+                            .registry
+                            .contains_key(MEDIA_ACTIVE_LAYER)
+                            .then_some(MEDIA_ACTIVE_LAYER)
+                    } else {
+                        self.store
+                            .registry
+                            .contains_key(CHROMIUM_TABS_LAYER)
+                            .then_some(CHROMIUM_TABS_LAYER)
+                    }
+                } else {
+                    self.rstate
+                        .app
+                        .as_deref()
+                        .filter(|layer| self.store.registry.contains_key(*layer))
+                }
             })
+    }
+
+    fn is_chromium_focused(&self) -> bool {
+        let class = self
+            .runtime
+            .text(key::CONTEXT_FOCUS_CLASS)
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        class.contains("chromium") || class.contains("chrome")
+    }
+
+    fn chromium_media_active(&self) -> bool {
+        self.runtime
+            .bool(key::CHROMIUM_MEDIA_ACTIVE)
+            .unwrap_or(false)
+    }
+
+    fn chromium_media_on_focused_tab(&self) -> bool {
+        if !self.is_chromium_focused() || !self.chromium_media_active() {
+            return false;
+        }
+        let media_title = self.runtime.text(key::MEDIA_ACTIVE_TITLE).unwrap_or("");
+        let focused_title = self.runtime.text(key::CONTEXT_FOCUS_TITLE).unwrap_or("");
+        titles_probably_match(media_title, focused_title)
     }
 
     fn media_available(&self) -> bool {
@@ -521,6 +657,7 @@ impl App {
 
     fn should_show_global_media_button(&self) -> bool {
         self.media_available()
+            && !self.chromium_media_on_focused_tab()
             && !matches!(
                 self.center_layer(),
                 Some(MEDIA_ACTIVE_LAYER) | Some(MEDIA_OVERLAY_LAYER)
@@ -528,7 +665,9 @@ impl App {
     }
 
     fn global_right_layer(&self) -> &'static str {
-        if self.should_show_global_media_button() {
+        if self.is_chromium_focused() && self.chromium_media_on_focused_tab() {
+            GLOBAL_RIGHT_TABS_LAYER
+        } else if self.should_show_global_media_button() {
             GLOBAL_RIGHT_MEDIA_LAYER
         } else {
             GLOBAL_RIGHT_LAYER
@@ -549,6 +688,18 @@ impl App {
             || self
                 .runtime
                 .is_dirty(key::MEDIA_ACTIVE_PLAYER)
+                .unwrap_or(false)
+            || self
+                .runtime
+                .is_dirty(key::MEDIA_ACTIVE_TITLE)
+                .unwrap_or(false)
+            || self
+                .runtime
+                .is_dirty(key::CONTEXT_FOCUS_TITLE)
+                .unwrap_or(false)
+            || self
+                .runtime
+                .is_dirty(key::CHROMIUM_MEDIA_ACTIVE)
                 .unwrap_or(false)
             || self
                 .store
@@ -730,7 +881,12 @@ impl App {
                         );
                     } else if !matches!(
                         action,
-                        Some(Action::OpenModal(_) | Action::PushLayer(_) | Action::PopLayer)
+                        Some(
+                            Action::OpenModal(_)
+                                | Action::PushLayer(_)
+                                | Action::PopLayer
+                                | Action::ChromiumActivateTab(_),
+                        )
                     ) {
                         self.touches.insert(
                             0,
@@ -856,6 +1012,11 @@ impl App {
                 self.mpris.seek(position_us)?;
                 self.runtime
                     .set(key::MEDIA_ACTIVE_POSITION, Value::Number(position_us))?;
+            }
+            Action::ChromiumActivateTab(id) => {
+                self.chromium.activate_tab(&id)?;
+                self.refresh_chromium_tabs(true)?;
+                self.needs_complete_redraw = true;
             }
             Action::PushLayer(layer) => {
                 self.rstate.modal = Some(layer);

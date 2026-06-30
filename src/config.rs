@@ -95,6 +95,7 @@ pub struct ButtonConfig {
     pub time: Option<String>,
     pub battery: Option<String>,
     pub media: Option<String>,
+    pub chromium_tabs: Option<String>,
     pub locale: Option<String>,
     #[serde(deserialize_with = "array_or_single", default)]
     pub action: Vec<Key>,
@@ -189,6 +190,7 @@ fn load_config(width: u16) -> Result<(Config, LayerStore)> {
                     locale: None,
                     battery: None,
                     media: None,
+                    chromium_tabs: None,
                     icon_width: None,
                     icon_height: None,
                     open_layer: None,
@@ -212,6 +214,7 @@ fn load_config(width: u16) -> Result<(Config, LayerStore)> {
         locale: None,
         battery: None,
         media: None,
+        chromium_tabs: None,
         icon_width: None,
         icon_height: None,
         open_layer: None,
@@ -229,6 +232,7 @@ fn load_config(width: u16) -> Result<(Config, LayerStore)> {
         locale: None,
         battery: None,
         media: None,
+        chromium_tabs: None,
         icon_width: None,
         icon_height: None,
         open_layer: Some("volume".into()),
@@ -245,6 +249,7 @@ fn load_config(width: u16) -> Result<(Config, LayerStore)> {
         locale: None,
         battery: None,
         media: None,
+        chromium_tabs: None,
         icon_width: None,
         icon_height: None,
         open_layer: Some("brightness".into()),
@@ -264,6 +269,7 @@ fn load_config(width: u16) -> Result<(Config, LayerStore)> {
             locale: None,
             battery: None,
             media: None,
+            chromium_tabs: None,
             icon_width: None,
             icon_height: None,
             open_layer: None,
@@ -280,6 +286,7 @@ fn load_config(width: u16) -> Result<(Config, LayerStore)> {
             locale: None,
             battery: None,
             media: None,
+            chromium_tabs: None,
             icon_width: None,
             icon_height: None,
             open_layer: Some("volume".into()),
@@ -296,6 +303,7 @@ fn load_config(width: u16) -> Result<(Config, LayerStore)> {
             locale: None,
             battery: None,
             media: None,
+            chromium_tabs: None,
             icon_width: None,
             icon_height: None,
             open_layer: Some("brightness".into()),
@@ -304,6 +312,24 @@ fn load_config(width: u16) -> Result<(Config, LayerStore)> {
         },
     ])
     .context("building the global-right-media layer")?;
+    let media_active_layer = FunctionLayer::with_config(vec![ButtonConfig {
+        icon: None,
+        text: None,
+        theme: None,
+        action: Vec::new(),
+        stretch: Some(8),
+        time: None,
+        locale: None,
+        battery: None,
+        media: Some("active".into()),
+        chromium_tabs: None,
+        icon_width: None,
+        icon_height: None,
+        open_layer: None,
+        push_layer: None,
+        pop_layer: None,
+    }])
+    .context("building the media-active layer")?;
     let media_overlay_layer = FunctionLayer::with_config(vec![
         ButtonConfig {
             icon: None,
@@ -315,6 +341,7 @@ fn load_config(width: u16) -> Result<(Config, LayerStore)> {
             locale: None,
             battery: None,
             media: Some("active".into()),
+            chromium_tabs: None,
             icon_width: None,
             icon_height: None,
             open_layer: None,
@@ -331,6 +358,7 @@ fn load_config(width: u16) -> Result<(Config, LayerStore)> {
             locale: None,
             battery: None,
             media: None,
+            chromium_tabs: None,
             icon_width: None,
             icon_height: None,
             open_layer: None,
@@ -339,13 +367,129 @@ fn load_config(width: u16) -> Result<(Config, LayerStore)> {
         },
     ])
     .context("building the media-overlay layer")?;
+    let chromium_tabs_layer = FunctionLayer::with_config(vec![ButtonConfig {
+        icon: None,
+        text: None,
+        theme: None,
+        action: Vec::new(),
+        stretch: Some(8),
+        time: None,
+        locale: None,
+        battery: None,
+        media: None,
+        chromium_tabs: Some("active".into()),
+        icon_width: None,
+        icon_height: None,
+        open_layer: None,
+        push_layer: None,
+        pop_layer: None,
+    }])
+    .context("building the chromium-tabs layer")?;
+    let chromium_tabs_overlay_layer = FunctionLayer::with_config(vec![
+        ButtonConfig {
+            icon: None,
+            text: None,
+            theme: None,
+            action: Vec::new(),
+            stretch: Some(16),
+            time: None,
+            locale: None,
+            battery: None,
+            media: None,
+            chromium_tabs: Some("active".into()),
+            icon_width: None,
+            icon_height: None,
+            open_layer: None,
+            push_layer: None,
+            pop_layer: None,
+        },
+        ButtonConfig {
+            icon: None,
+            text: Some("×".into()),
+            theme: None,
+            action: Vec::new(),
+            stretch: Some(1),
+            time: None,
+            locale: None,
+            battery: None,
+            media: None,
+            chromium_tabs: None,
+            icon_width: None,
+            icon_height: None,
+            open_layer: None,
+            push_layer: None,
+            pop_layer: Some(true),
+        },
+    ])
+    .context("building the chromium-tabs-overlay layer")?;
+    let global_right_tabs_layer = FunctionLayer::with_config(vec![
+        ButtonConfig {
+            icon: None,
+            text: Some("Tabs".into()),
+            theme: None,
+            action: Vec::new(),
+            stretch: None,
+            time: None,
+            locale: None,
+            battery: None,
+            media: None,
+            chromium_tabs: None,
+            icon_width: None,
+            icon_height: None,
+            open_layer: None,
+            push_layer: Some("chromium-tabs-overlay".into()),
+            pop_layer: None,
+        },
+        ButtonConfig {
+            icon: Some("volume_up".into()),
+            text: None,
+            theme: None,
+            action: Vec::new(),
+            stretch: None,
+            time: None,
+            locale: None,
+            battery: None,
+            media: None,
+            chromium_tabs: None,
+            icon_width: None,
+            icon_height: None,
+            open_layer: Some("volume".into()),
+            push_layer: None,
+            pop_layer: None,
+        },
+        ButtonConfig {
+            icon: Some("brightness_high".into()),
+            text: None,
+            theme: None,
+            action: Vec::new(),
+            stretch: None,
+            time: None,
+            locale: None,
+            battery: None,
+            media: None,
+            chromium_tabs: None,
+            icon_width: None,
+            icon_height: None,
+            open_layer: Some("brightness".into()),
+            push_layer: None,
+            pop_layer: None,
+        },
+    ])
+    .context("building the global-right-tabs layer")?;
     let mut registry = HashMap::new();
     registry.insert("media".to_string(), media_layer);
     registry.insert("fkeys".to_string(), fkey_layer);
     registry.insert("global-left".to_string(), global_left_layer);
     registry.insert("global-right".to_string(), global_right_layer);
     registry.insert("global-right-media".to_string(), global_right_media_layer);
+    registry.insert("global-right-tabs".to_string(), global_right_tabs_layer);
+    registry.insert("media-active".to_string(), media_active_layer);
     registry.insert("media-overlay".to_string(), media_overlay_layer);
+    registry.insert("chromium-tabs".to_string(), chromium_tabs_layer);
+    registry.insert(
+        "chromium-tabs-overlay".to_string(),
+        chromium_tabs_overlay_layer,
+    );
     for (name, layer) in base.layers.take().unwrap_or_default() {
         registry.insert(
             name.clone(),

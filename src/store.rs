@@ -23,6 +23,11 @@ pub(crate) mod key {
     pub(crate) const MEDIA_ACTIVE_ART_URL: &str = "media.active.art_url";
     pub(crate) const MEDIA_ACTIVE_LENGTH: &str = "media.active.length";
     pub(crate) const MEDIA_ACTIVE_POSITION: &str = "media.active.position";
+    pub(crate) const CHROMIUM_MEDIA_ACTIVE: &str = "chromium.media.active";
+    pub(crate) const CHROMIUM_TABS_AVAILABLE: &str = "chromium.tabs.available";
+    pub(crate) const CHROMIUM_TABS_JSON: &str = "chromium.tabs.json";
+    pub(crate) const CHROMIUM_TABS_COUNT: &str = "chromium.tabs.count";
+    pub(crate) const CHROMIUM_TABS_ACTIVE_INDEX: &str = "chromium.tabs.active_index";
 }
 
 /// Validated dotted state key, e.g. `hardware.brightness`.

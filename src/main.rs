@@ -20,6 +20,7 @@ mod action;
 mod app;
 mod backlight;
 mod battery;
+mod chromium;
 mod config;
 mod context;
 mod display;

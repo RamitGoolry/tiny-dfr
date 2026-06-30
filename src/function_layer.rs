@@ -98,6 +98,7 @@ impl FunctionLayer {
         match self.cells.get_mut(i).map(|c| &mut c.widget) {
             Some(Widget::Button(b)) => b.on_press(store),
             Some(Widget::Media(m)) => m.on_press(x, &region, store),
+            Some(Widget::ChromiumTabs(t)) => t.on_press(x, &region, store),
             _ => None,
         }
     }

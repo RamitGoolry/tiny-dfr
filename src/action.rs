@@ -29,6 +29,8 @@ pub(crate) enum Action {
     MediaNext,
     /// Seek the active MPRIS player to an absolute position in microseconds.
     MediaSeek(f64),
+    /// Activate a Chromium tab by DevTools target id.
+    ChromiumActivateTab(String),
     /// Open a named layer as a full-bar transient overlay.
     PushLayer(String),
     /// Close the current transient layer and return to the previous bar state.
