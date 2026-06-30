@@ -49,6 +49,13 @@ struct ConfigProxy {
     primary_layer_keys: Option<Vec<ButtonConfig>>,
     media_layer_keys: Option<Vec<ButtonConfig>>,
     app_layers: Option<HashMap<String, String>>,
+    layers: Option<HashMap<String, LayerConfig>>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct LayerConfig {
+    keys: Vec<ButtonConfig>,
 }
 
 fn array_or_single<'de, D>(deserializer: D) -> Result<Vec<Key>, D::Error>
@@ -147,6 +154,11 @@ fn load_config(width: u16) -> Result<(Config, LayerStore)> {
                     .double_press_switch_layers
                     .or(base.double_press_switch_layers);
                 base.app_layers = user.app_layers.or(base.app_layers);
+                if let Some(user_layers) = user.layers {
+                    base.layers
+                        .get_or_insert_with(HashMap::new)
+                        .extend(user_layers);
+                }
             }
             Err(e) if e.kind() == ErrorKind::NotFound => {}
             Err(e) => {
@@ -182,9 +194,61 @@ fn load_config(width: u16) -> Result<(Config, LayerStore)> {
         FunctionLayer::with_config(media_layer_keys).context("building the media layer")?;
     let fkey_layer =
         FunctionLayer::with_config(primary_layer_keys).context("building the primary layer")?;
+    let global_left_layer = FunctionLayer::with_config(vec![ButtonConfig {
+        icon: None,
+        text: Some("esc".into()),
+        theme: None,
+        action: vec![Key::Esc],
+        stretch: None,
+        time: None,
+        locale: None,
+        battery: None,
+        icon_width: None,
+        icon_height: None,
+        open_layer: None,
+    }])
+    .context("building the global-left layer")?;
+    let global_right_layer = FunctionLayer::with_config(vec![
+        ButtonConfig {
+            icon: Some("volume_up".into()),
+            text: None,
+            theme: None,
+            action: Vec::new(),
+            stretch: None,
+            time: None,
+            locale: None,
+            battery: None,
+            icon_width: None,
+            icon_height: None,
+            open_layer: Some("volume".into()),
+        },
+        ButtonConfig {
+            icon: Some("brightness_high".into()),
+            text: None,
+            theme: None,
+            action: Vec::new(),
+            stretch: None,
+            time: None,
+            locale: None,
+            battery: None,
+            icon_width: None,
+            icon_height: None,
+            open_layer: Some("brightness".into()),
+        },
+    ])
+    .context("building the global-right layer")?;
     let mut registry = HashMap::new();
     registry.insert("media".to_string(), media_layer);
     registry.insert("fkeys".to_string(), fkey_layer);
+    registry.insert("global-left".to_string(), global_left_layer);
+    registry.insert("global-right".to_string(), global_right_layer);
+    for (name, layer) in base.layers.take().unwrap_or_default() {
+        registry.insert(
+            name.clone(),
+            FunctionLayer::with_config(layer.keys)
+                .with_context(|| format!("building configured layer `{name}`"))?,
+        );
+    }
     // Built-in modal slider layers, entered via a button's `OpenLayer = "..."`.
     registry.insert(
         "brightness".to_string(),
@@ -204,6 +268,14 @@ fn load_config(width: u16) -> Result<(Config, LayerStore)> {
     } else {
         ["fkeys".to_string(), "media".to_string()]
     };
+    for (class, layer) in base.app_layers.as_ref().into_iter().flatten() {
+        if !registry.contains_key(layer) {
+            return Err(anyhow!(
+                "AppLayers maps class `{class}` to unknown layer `{layer}`"
+            ));
+        }
+    }
+
     let cfg = Config {
         show_button_outlines: require(base.show_button_outlines, "ShowButtonOutlines")?,
         enable_pixel_shift: require(base.enable_pixel_shift, "EnablePixelShift")?,

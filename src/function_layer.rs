@@ -9,6 +9,23 @@ use crate::store::{StateKey, Store};
 use crate::widgets::{Cell, Region, Slider, SliderBackend, Widget};
 use crate::{dbg_ts, BUTTON_SPACING_PX};
 
+#[derive(Clone, Copy)]
+pub(crate) struct LayerArea {
+    pub(crate) left: f64,
+    pub(crate) width: i32,
+    pub(crate) height: i32,
+}
+
+impl LayerArea {
+    pub(crate) fn full(width: i32, height: i32) -> LayerArea {
+        LayerArea {
+            left: 0.0,
+            width,
+            height,
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct FunctionLayer {
     displays_time: bool,
@@ -128,28 +145,54 @@ impl FunctionLayer {
         store: &Store,
         complete_redraw: bool,
     ) -> Result<Vec<ClipRect>> {
+        self.draw_in(
+            config,
+            LayerArea::full(width, height),
+            surface,
+            pixel_shift,
+            store,
+            complete_redraw,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn draw_in(
+        &mut self,
+        config: &Config,
+        area: LayerArea,
+        surface: &Surface,
+        pixel_shift: (f64, f64),
+        store: &Store,
+        complete_redraw: bool,
+    ) -> Result<Vec<ClipRect>> {
         let c = Context::new(surface)?;
         let mut modified_regions = if complete_redraw {
-            vec![ClipRect::new(0, 0, height as u16, width as u16)]
+            vec![ClipRect::new(
+                0,
+                area.left as u16,
+                area.height as u16,
+                (area.left + area.width as f64) as u16,
+            )]
         } else {
             Vec::new()
         };
-        c.translate(height as f64, 0.0);
+        c.translate(area.height as f64, 0.0);
         c.rotate((90.0f64).to_radians());
         let pixel_shift_width = if config.enable_pixel_shift {
             PIXEL_SHIFT_WIDTH_PX
         } else {
             0
         };
-        let virtual_button_width = ((width - pixel_shift_width as i32)
+        let virtual_button_width = ((area.width - pixel_shift_width as i32)
             - (BUTTON_SPACING_PX * (self.virtual_button_count - 1) as i32))
-            as f64
+            .max(1) as f64
             / self.virtual_button_count as f64;
         let (pixel_shift_x, pixel_shift_y) = pixel_shift;
 
         if complete_redraw {
             c.set_source_rgb(0.0, 0.0, 0.0);
-            c.paint().unwrap();
+            c.rectangle(area.left, 0.0, area.width as f64, area.height as f64);
+            c.fill().unwrap();
         }
         c.set_font_face(&config.font_face);
         c.set_font_size(32.0);
@@ -163,8 +206,8 @@ impl FunctionLayer {
                 continue;
             };
 
-            let left_edge = (start as f64 * (virtual_button_width + BUTTON_SPACING_PX as f64))
-                .floor()
+            let left_edge = area.left
+                + (start as f64 * (virtual_button_width + BUTTON_SPACING_PX as f64)).floor()
                 + pixel_shift_x
                 + (pixel_shift_width / 2) as f64;
 
@@ -175,7 +218,7 @@ impl FunctionLayer {
             let region = Region {
                 left: left_edge,
                 width: button_width,
-                height,
+                height: area.height,
                 y_shift: pixel_shift_y,
             };
             modified_regions.extend(cell.widget.draw(
@@ -183,7 +226,7 @@ impl FunctionLayer {
                 config,
                 &region,
                 store,
-                width,
+                area.width,
                 complete_redraw,
             )?);
             start = end;
@@ -192,6 +235,7 @@ impl FunctionLayer {
         Ok(modified_regions)
     }
 
+    #[allow(dead_code)]
     pub(crate) fn hit(
         &self,
         width: u16,
@@ -200,12 +244,28 @@ impl FunctionLayer {
         y: f64,
         i: Option<usize>,
     ) -> Option<usize> {
-        let virtual_button_width =
-            (width as i32 - (BUTTON_SPACING_PX * (self.virtual_button_count - 1) as i32)) as f64
-                / self.virtual_button_count as f64;
+        self.hit_in(LayerArea::full(width as i32, height as i32), x, y, i)
+    }
+
+    pub(crate) fn hit_in(
+        &self,
+        area: LayerArea,
+        x: f64,
+        y: f64,
+        i: Option<usize>,
+    ) -> Option<usize> {
+        if x < area.left || x > area.left + area.width as f64 {
+            return None;
+        }
+        let local_x = x - area.left;
+        let virtual_button_width = (area.width
+            - (BUTTON_SPACING_PX * (self.virtual_button_count - 1) as i32))
+            .max(1) as f64
+            / self.virtual_button_count as f64;
 
         let i = i.unwrap_or_else(|| {
-            let virtual_i = (x / (width as f64 / self.virtual_button_count as f64)) as usize;
+            let virtual_i =
+                (local_x / (area.width as f64 / self.virtual_button_count as f64)) as usize;
             // Find the cell whose virtual span contains `virtual_i`.
             let mut acc = 0;
             self.cells
@@ -230,10 +290,10 @@ impl FunctionLayer {
             + ((end - start - 1) as f64 * (virtual_button_width + BUTTON_SPACING_PX as f64))
                 .floor();
 
-        if x < left_edge
-            || x > (left_edge + button_width)
-            || y < 0.1 * height as f64
-            || y > 0.9 * height as f64
+        if local_x < left_edge
+            || local_x > (left_edge + button_width)
+            || y < 0.1 * area.height as f64
+            || y > 0.9 * area.height as f64
         {
             return None;
         }

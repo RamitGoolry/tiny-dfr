@@ -23,6 +23,7 @@ use crate::backlight::BacklightManager;
 use crate::config::{Config, ConfigManager};
 use crate::display::DrmBackend;
 use crate::event::AppEvent;
+use crate::function_layer::LayerArea;
 use crate::input::toggle_keys;
 use crate::kbd_backlight::KbdBacklight;
 use crate::layer::{LayerStore, ResolverState, TouchTarget};
@@ -30,7 +31,10 @@ use crate::pixel_shift::PixelShiftManager;
 use crate::store::{key, StateKey, Store, Value};
 use crate::touch::{TouchPhase, TouchSample};
 use crate::volume::VolumeMixer;
-use crate::{dbg_ts, TIMEOUT_MS, TOUCH_ACTIVE_POLL_MS};
+use crate::{dbg_ts, BUTTON_SPACING_PX, TIMEOUT_MS, TOUCH_ACTIVE_POLL_MS};
+
+const GLOBAL_LEFT_LAYER: &str = "global-left";
+const GLOBAL_RIGHT_LAYER: &str = "global-right";
 
 pub(crate) struct AppGeometry {
     pub(crate) width: u16,
@@ -325,41 +329,155 @@ impl App {
 
     fn render_active(&mut self, drm: &mut DrmBackend) -> Result<()> {
         let (height, width) = drm.mode().size();
-        let active = self.store.resolve(&self.rstate);
-        if self.needs_complete_redraw || self.store.get(&active).needs_redraw(&self.runtime) {
-            let shift = if self.cfg.enable_pixel_shift {
-                self.pixel_shift.get()
-            } else {
-                (0.0, 0.0)
-            };
-            let t_r = Instant::now();
-            let clips = self.store.get_mut(&active).draw(
+        let (height_i, width_i) = (height as i32, width as i32);
+        let modal = self.rstate.modal.clone();
+        let needs_redraw = if let Some(layer) = &modal {
+            self.needs_complete_redraw || self.store.get(layer).needs_redraw(&self.runtime)
+        } else {
+            self.frame_needs_redraw(width_i, height_i)
+        };
+        if !needs_redraw {
+            return Ok(());
+        }
+
+        let shift = if self.cfg.enable_pixel_shift {
+            self.pixel_shift.get()
+        } else {
+            (0.0, 0.0)
+        };
+        let t_r = Instant::now();
+        let clips = if let Some(layer) = modal {
+            self.store.get_mut(&layer).draw(
                 &self.cfg,
-                width as i32,
-                height as i32,
+                width_i,
+                height_i,
                 &self.surface,
                 shift,
                 &self.runtime,
                 self.needs_complete_redraw,
-            )?;
-            let t_draw = t_r.elapsed();
-            let data = self.surface.data()?;
-            drm.map()?.as_mut()[..data.len()].copy_from_slice(&data);
-            // Partial (per-button) damage, as before; the probe times the push.
-            let t_d = Instant::now();
-            drm.dirty(&clips)?;
-            let t_dirty = t_d.elapsed();
-            eprintln!(
-                "[dbg {:.6}] REDRAW draw={}ms dirty={}ms clips={} complete={}",
-                dbg_ts(),
-                t_draw.as_millis(),
-                t_dirty.as_millis(),
-                clips.len(),
-                self.needs_complete_redraw
-            );
-            self.needs_complete_redraw = false;
-        }
+            )?
+        } else {
+            self.draw_frame(width_i, height_i, shift)?
+        };
+        let t_draw = t_r.elapsed();
+        let data = self.surface.data()?;
+        drm.map()?.as_mut()[..data.len()].copy_from_slice(&data);
+        // Partial (per-button) damage, as before; the probe times the push.
+        let t_d = Instant::now();
+        drm.dirty(&clips)?;
+        let t_dirty = t_d.elapsed();
+        eprintln!(
+            "[dbg {:.6}] REDRAW draw={}ms dirty={}ms clips={} complete={}",
+            dbg_ts(),
+            t_draw.as_millis(),
+            t_dirty.as_millis(),
+            clips.len(),
+            self.needs_complete_redraw
+        );
+        self.needs_complete_redraw = false;
         Ok(())
+    }
+
+    fn bar_areas(&self, width: i32, height: i32) -> (LayerArea, LayerArea, LayerArea) {
+        // Compact always-global edge controls. The app-control center gets the
+        // remaining width instead of making Esc/Volume/Brightness full row cells.
+        let global_button_width = (height * 3).clamp(140, 220);
+        let left_width = global_button_width;
+        let right_width = global_button_width * 2 + BUTTON_SPACING_PX;
+        let center_left = left_width as f64 + BUTTON_SPACING_PX as f64;
+        let center_width = (width - left_width - right_width - BUTTON_SPACING_PX * 2).max(1);
+        let right_left = (width - right_width) as f64;
+        (
+            LayerArea {
+                left: 0.0,
+                width: left_width,
+                height,
+            },
+            LayerArea {
+                left: center_left,
+                width: center_width,
+                height,
+            },
+            LayerArea {
+                left: right_left,
+                width: right_width,
+                height,
+            },
+        )
+    }
+
+    fn center_layer(&self) -> Option<&str> {
+        self.rstate
+            .app
+            .as_deref()
+            .filter(|layer| self.store.registry.contains_key(*layer))
+    }
+
+    fn frame_needs_redraw(&self, width: i32, height: i32) -> bool {
+        if self.needs_complete_redraw {
+            return true;
+        }
+        let (_left, _center, _right) = self.bar_areas(width, height);
+        self.store
+            .get(GLOBAL_LEFT_LAYER)
+            .needs_redraw(&self.runtime)
+            || self
+                .center_layer()
+                .is_some_and(|layer| self.store.get(layer).needs_redraw(&self.runtime))
+            || self
+                .store
+                .get(GLOBAL_RIGHT_LAYER)
+                .needs_redraw(&self.runtime)
+    }
+
+    fn draw_frame(
+        &mut self,
+        width: i32,
+        height: i32,
+        shift: (f64, f64),
+    ) -> Result<Vec<drm::control::ClipRect>> {
+        let (left, center, right) = self.bar_areas(width, height);
+        let mut clips = if self.needs_complete_redraw {
+            let c = Context::new(&self.surface)?;
+            c.set_source_rgb(0.0, 0.0, 0.0);
+            c.paint()?;
+            vec![drm::control::ClipRect::new(
+                0,
+                0,
+                height as u16,
+                width as u16,
+            )]
+        } else {
+            Vec::new()
+        };
+
+        clips.extend(self.store.get_mut(GLOBAL_LEFT_LAYER).draw_in(
+            &self.cfg,
+            left,
+            &self.surface,
+            shift,
+            &self.runtime,
+            self.needs_complete_redraw,
+        )?);
+        if let Some(center_layer) = self.center_layer().map(str::to_string) {
+            clips.extend(self.store.get_mut(&center_layer).draw_in(
+                &self.cfg,
+                center,
+                &self.surface,
+                shift,
+                &self.runtime,
+                self.needs_complete_redraw,
+            )?);
+        }
+        clips.extend(self.store.get_mut(GLOBAL_RIGHT_LAYER).draw_in(
+            &self.cfg,
+            right,
+            &self.surface,
+            shift,
+            &self.runtime,
+            self.needs_complete_redraw,
+        )?);
+        Ok(clips)
     }
 
     pub(crate) fn render_error(&mut self, drm: &mut DrmBackend, err: &anyhow::Error) -> Result<()> {
@@ -411,20 +529,58 @@ impl App {
         }
     }
 
+    fn hit_layer(&self, layer: &str, x: f64, y: f64, i: Option<usize>) -> Option<usize> {
+        let area = if self.rstate.modal.as_deref() == Some(layer) {
+            LayerArea::full(self.width as i32, self.height as i32)
+        } else {
+            let (left, center, right) = self.bar_areas(self.width as i32, self.height as i32);
+            if layer == GLOBAL_LEFT_LAYER {
+                left
+            } else if layer == GLOBAL_RIGHT_LAYER {
+                right
+            } else if self.center_layer() == Some(layer) {
+                center
+            } else {
+                return None;
+            }
+        };
+        self.store.get(layer).hit_in(area, x, y, i)
+    }
+
+    fn hit_bar(&self, x: f64, y: f64) -> Option<(String, usize)> {
+        if let Some(modal) = &self.rstate.modal {
+            return self
+                .hit_layer(modal, x, y, None)
+                .map(|i| (modal.clone(), i));
+        }
+        for layer in [
+            Some(GLOBAL_LEFT_LAYER),
+            self.center_layer(),
+            Some(GLOBAL_RIGHT_LAYER),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if let Some(i) = self.hit_layer(layer, x, y, None) {
+                return Some((layer.to_string(), i));
+            }
+        }
+        None
+    }
+
     /// Dispatch one raw digitizer sample (Down/Motion/Up).
     pub(crate) fn on_touch(&mut self, s: TouchSample) -> Result<()> {
         self.backlight.wake(); // any digitizer touch keeps the bar lit
-        let (width, height) = (self.width, self.height);
+        let width = self.width;
         let (x, y) = (s.x, s.y);
         match s.phase {
             TouchPhase::Down => {
                 if self.backlight.current_bl() == 0 {
                     return Ok(()); // bar is dark; the touch just woke it
                 }
-                let active = self.store.resolve(&self.rstate);
-                let hit = self.store.get(&active).hit(width, height, x, y, None);
+                let hit = self.hit_bar(x, y);
                 eprintln!("[dbg {:.6}] DOWN x={x:.0} y={y:.0} hit={hit:?}", dbg_ts());
-                if let Some(btn) = hit {
+                if let Some((active, btn)) = hit {
                     let action = self.store.get_mut(&active).on_press(btn, &self.runtime);
                     // A modal hand-off (OpenModal) records its own Slider
                     // target inside `apply`; everything else is a button.
@@ -443,15 +599,10 @@ impl App {
             TouchPhase::Motion => match self.touches.get(&0) {
                 Some(TouchTarget::Button { layer, btn }) => {
                     let (layer, btn) = (layer.clone(), *btn);
-                    let active = self.store.resolve(&self.rstate);
                     // Follow the finger: re-pressing re-lights + re-emits,
                     // leaving releases — both no-ops if already in that
                     // state, so we just call the matching edge each move.
-                    let hit = self
-                        .store
-                        .get(&active)
-                        .hit(width, height, x, y, Some(btn))
-                        .is_some();
+                    let hit = self.hit_layer(&layer, x, y, Some(btn)).is_some();
                     let action = if hit {
                         self.store.get_mut(&layer).on_press(btn, &self.runtime)
                     } else {
