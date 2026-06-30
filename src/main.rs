@@ -8,7 +8,6 @@ use nix::{
         signal::{SigSet, Signal},
     },
 };
-use privdrop::PrivDrop;
 use std::{
     fs::OpenOptions,
     os::fd::AsFd,
@@ -22,6 +21,7 @@ mod app;
 mod backlight;
 mod battery;
 mod config;
+mod context;
 mod display;
 mod fonts;
 mod function_layer;
@@ -36,6 +36,7 @@ mod widgets;
 
 use crate::app::App;
 use crate::config::ConfigManager;
+use crate::context::ContextListener;
 use crate::input::Interface;
 use crate::kbd_backlight::KbdBacklight;
 use backlight::BacklightManager;
@@ -95,36 +96,22 @@ fn real_main(drm: &mut DrmBackend) {
         .fb_info()
         .expect("failed to query DRM framebuffer info")
         .size();
-    // Root resources: opened before the privilege drop so their fds survive as
-    // `nobody`. (drm is already open; uinput + the raw digitizer open here.)
+    // tiny-dfr runs in the user session — no privilege drop. Device access comes
+    // from group membership + udev rules (see the README): uinput, the digitizer,
+    // the backlights, and the DRM card are all opened directly as the user.
     let uinput = UInputHandle::new(
         OpenOptions::new()
             .write(true)
             .open("/dev/uinput")
-            .expect("failed to open /dev/uinput (is the uinput kernel module loaded?)"),
+            .expect("failed to open /dev/uinput (is the tiny-dfr udev rule installed?)"),
     );
     let backlight = BacklightManager::new();
-    // Keyboard backlight LED write fd, opened as root so it survives as `nobody`.
     let kbd = KbdBacklight::new();
-    // Volume bridge IPC files, created as root so `nobody` can use them after the
-    // drop; the user-session helper applies them to PipeWire. See volume.rs.
-    volume::init_ipc();
     // The T1 digitizer is read raw (see touch.rs) — libinput mangles its drags.
     let mut touch_reader = TouchReader::open(width, height);
     let mut cfg_mgr = ConfigManager::new();
 
-    // drop privileges to the input and video groups. (Volume goes through the
-    // file bridge in volume.rs now, so no audio-group / ALSA access is needed.)
-    let groups = ["input", "video"];
-
-    PrivDrop::default()
-        .user("nobody")
-        .group_list(&groups)
-        .apply()
-        .unwrap_or_else(|e| panic!("Failed to drop privileges: {}", e));
-
-    // App owns the bar state + dispatch; its constructor runs the uinput device
-    // setup, which must stay AFTER the privilege drop above.
+    // App owns the bar state + dispatch.
     let mut app = App::new(&cfg_mgr, width, db_width, db_height, uinput, backlight, kbd);
 
     let mut input_main = Libinput::new_with_udev(Interface);
@@ -151,6 +138,13 @@ fn real_main(drm: &mut DrmBackend) {
         epoll
             .add(reader.as_fd(), EpollEvent::new(EpollFlags::EPOLLIN, 4))
             .expect("failed to register the digitizer fd with epoll");
+    }
+    // Hyprland focused-window events drive the app-aware layers (context.rs).
+    let mut context = ContextListener::new();
+    if let Some(fd) = context.as_fd() {
+        epoll
+            .add(fd, EpollEvent::new(EpollFlags::EPOLLIN, 5))
+            .expect("failed to register the Hyprland context fd with epoll");
     }
 
     loop {
@@ -207,6 +201,17 @@ fn real_main(drm: &mut DrmBackend) {
             }
             for s in samples {
                 app.on_touch(s, width, height, &state);
+            }
+        }
+
+        // ----- Hyprland focused-window context -> app-aware layer (context.rs).
+        if let Some(class) = context.poll() {
+            app.on_focus(&class);
+        }
+        // Reconnect if Hyprland went away (e.g. compositor restart) and re-register.
+        if !context.is_connected() && context.reconnect() {
+            if let Some(fd) = context.as_fd() {
+                let _ = epoll.add(fd, EpollEvent::new(EpollFlags::EPOLLIN, 5));
             }
         }
         app.update_backlight();

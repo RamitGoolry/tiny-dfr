@@ -25,6 +25,9 @@ pub struct Config {
     pub adaptive_brightness: bool,
     pub active_brightness: u32,
     pub double_press_switch_layers: u32,
+    /// Focused-window class -> layer name. When the focused app matches, that layer
+    /// takes precedence over the base layers (see `app.rs::on_focus`).
+    pub app_layers: HashMap<String, String>,
 }
 
 #[derive(Deserialize)]
@@ -39,6 +42,7 @@ struct ConfigProxy {
     double_press_switch_layers: Option<u32>,
     primary_layer_keys: Option<Vec<ButtonConfig>>,
     media_layer_keys: Option<Vec<ButtonConfig>>,
+    app_layers: Option<HashMap<String, String>>,
 }
 
 fn array_or_single<'de, D>(deserializer: D) -> Result<Vec<Key>, D::Error>
@@ -135,6 +139,7 @@ fn load_config(width: u16) -> Result<(Config, LayerStore)> {
             base.double_press_switch_layers = user
                 .double_press_switch_layers
                 .or(base.double_press_switch_layers);
+            base.app_layers = user.app_layers.or(base.app_layers);
         }
         Err(e) if e.kind() == ErrorKind::NotFound => {}
         Err(e) => return Err(anyhow::Error::from(e).context(format!("reading {USER_CFG_PATH}"))),
@@ -197,6 +202,7 @@ fn load_config(width: u16) -> Result<(Config, LayerStore)> {
             base.double_press_switch_layers,
             "DoublePressSwitchLayers",
         )?,
+        app_layers: base.app_layers.unwrap_or_default(),
     };
     Ok((
         cfg,

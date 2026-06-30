@@ -69,8 +69,9 @@ impl SliderBackend for VolumeSlider {
     fn apply(&self, level: f64) -> Action {
         Action::SetVolume(level)
     }
-    fn initial_level(&self, s: &State) -> f64 {
-        s.volume
+    fn initial_level(&self, _s: &State) -> f64 {
+        // Read PipeWire live on grab (not from State) — see volume.rs.
+        crate::volume::current_level()
     }
 }
 

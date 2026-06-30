@@ -61,9 +61,9 @@ pub(crate) struct App {
 }
 
 impl App {
-    /// Build the App after the privilege drop. `uinput` and `backlight` are opened
-    /// as root in `real_main` (so their fds survive as `nobody`) and handed in here;
-    /// the uinput *device setup* below intentionally runs post-PrivDrop.
+    /// Build the App. `uinput`, `backlight`, and `kbd` are opened in `real_main`
+    /// and handed in; the daemon runs in the user session, so no privilege drop is
+    /// involved (device access comes from group/udev rules — see the README).
     pub(crate) fn new(
         cfg_mgr: &ConfigManager,
         width: u16,
@@ -80,11 +80,10 @@ impl App {
             .unwrap_or_else(|e| panic!("failed to load configuration: {e:#}"));
         let pixel_shift = PixelShiftManager::new();
         let last = Instant::now();
-        // File-backed bridge to the user-session PipeWire helper (see volume.rs);
-        // the IPC files are created in real_main before the privilege drop.
+        // In-process PipeWire volume via wpctl (see volume.rs); spawns its apply thread.
         let volume = VolumeMixer::new();
 
-        // uinput virtual-device setup — must stay AFTER the privilege drop.
+        // uinput virtual-device setup.
         uinput
             .set_evbit(EventKind::Key)
             .expect("failed to enable key events on the uinput device");
@@ -149,7 +148,21 @@ impl App {
         State {
             brightness: self.backlight.display_level(),
             kbd_illum: self.kbd.level(),
-            volume: self.volume.level(),
+        }
+    }
+
+    /// A Hyprland focus change: map the focused window class to a layer (via
+    /// `app_layers` config) and let it take precedence over the base layers. An
+    /// unmapped class clears `app`, falling back to the base layer.
+    pub(crate) fn on_focus(&mut self, class: &str) {
+        let new_app = self.cfg.app_layers.get(class).cloned();
+        if new_app != self.rstate.app {
+            eprintln!(
+                "[dbg {:.6}] FOCUS class={class:?} -> app_layer={new_app:?}",
+                dbg_ts()
+            );
+            self.rstate.app = new_app;
+            self.needs_complete_redraw = true;
         }
     }
 
