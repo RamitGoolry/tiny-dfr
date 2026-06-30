@@ -31,6 +31,10 @@ pub(crate) enum Action {
     MediaSeek(f64),
     /// Activate a Chromium tab by DevTools target id.
     ChromiumActivateTab(String),
+    /// Send a JSONL action to the selected local Neovim tiny-dfr bridge.
+    NvimBridge(String),
+    /// Connect/open a DBUI query buffer for the configured DB key.
+    NvimDbConnect(String),
     /// Open a named layer as a full-bar transient overlay.
     PushLayer(String),
     /// Close the current transient layer and return to the previous bar state.

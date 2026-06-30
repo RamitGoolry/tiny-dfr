@@ -5,12 +5,14 @@
 //! the App stays the single effectful place.
 pub(crate) mod button;
 pub(crate) mod chromium_tabs;
+pub(crate) mod dbui_connections;
 pub(crate) mod indicator;
 pub(crate) mod media;
 pub(crate) mod slider;
 
-pub(crate) use button::Button;
+pub(crate) use button::{Button, DapContinuePauseButton};
 pub(crate) use chromium_tabs::ChromiumTabsWidget;
+pub(crate) use dbui_connections::DbuiConnectionsWidget;
 pub(crate) use media::MediaWidget;
 pub(crate) use slider::{BrightnessSlider, KbdIllumSlider, Slider, VolumeSlider};
 
@@ -46,6 +48,9 @@ pub(crate) trait ButtonBackend {
     fn draw_content(&self, c: &Context, r: &Region, store: &Store);
     fn on_press(&mut self, store: &Store) -> Option<Action>;
     fn on_release(&mut self, store: &Store) -> Option<Action>;
+    fn needs_redraw(&self, _store: &Store) -> bool {
+        false
+    }
 }
 
 /// A passive widget: renders content as a function of `&Store` and owns its own
@@ -119,6 +124,7 @@ pub(crate) enum Widget {
     Slider(Slider),
     Media(MediaWidget),
     ChromiumTabs(ChromiumTabsWidget),
+    DbuiConnections(DbuiConnectionsWidget),
     Indicator(Box<dyn IndicatorBackend>),
     Spacer,
 }
@@ -173,10 +179,11 @@ impl Widget {
     /// passive `Spacer`). Indicators own their cadence via `needs_redraw`.
     pub(crate) fn changed(&self, store: &Store) -> bool {
         match self {
-            Widget::Button(b) => b.changed,
+            Widget::Button(b) => b.changed(store),
             Widget::Slider(sl) => sl.changed,
             Widget::Media(media) => media.needs_redraw(store),
             Widget::ChromiumTabs(tabs) => tabs.needs_redraw(store),
+            Widget::DbuiConnections(dbs) => dbs.needs_redraw(store),
             Widget::Indicator(i) => i.needs_redraw(store),
             Widget::Spacer => false,
         }
@@ -187,7 +194,11 @@ impl Widget {
     pub(crate) fn interactive(&self) -> bool {
         matches!(
             self,
-            Widget::Button(_) | Widget::Slider(_) | Widget::Media(_) | Widget::ChromiumTabs(_)
+            Widget::Button(_)
+                | Widget::Slider(_)
+                | Widget::Media(_)
+                | Widget::ChromiumTabs(_)
+                | Widget::DbuiConnections(_)
         )
     }
 
@@ -205,6 +216,7 @@ impl Widget {
             Widget::Slider(s) => Ok(s.draw(c, width, region.height, complete_redraw)),
             Widget::Media(m) => m.draw(c, cfg, region, store, complete_redraw),
             Widget::ChromiumTabs(t) => t.draw(c, cfg, region, store, complete_redraw),
+            Widget::DbuiConnections(dbs) => dbs.draw(c, cfg, region, store, complete_redraw),
             Widget::Indicator(b) => b.draw(c, region, store, complete_redraw),
             Widget::Spacer => Ok(vec![]),
         }

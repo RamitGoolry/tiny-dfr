@@ -1,7 +1,11 @@
 use crate::fonts::{FontConfig, Pattern};
 use crate::function_layer::FunctionLayer;
 use crate::layer::LayerStore;
-use crate::widgets::{BrightnessSlider, KbdIllumSlider, VolumeSlider};
+use crate::widgets::button::KeyButton;
+use crate::widgets::{
+    BrightnessSlider, Button, Cell, DapContinuePauseButton, DbuiConnectionsWidget, KbdIllumSlider,
+    VolumeSlider, Widget,
+};
 use anyhow::{anyhow, Context, Result};
 use cairo::FontFace;
 use freetype::Library as FtLibrary;
@@ -422,6 +426,109 @@ fn load_config(width: u16) -> Result<(Config, LayerStore)> {
         },
     ])
     .context("building the chromium-tabs-overlay layer")?;
+    let mut terminal_nvim_debug_cells = vec![Cell {
+        stretch: 1,
+        widget: Widget::Button(Button::new(Box::new(DapContinuePauseButton::new()?))),
+    }];
+    terminal_nvim_debug_cells.extend(
+        [
+            ("debug_step_over", "dap.step_over"),
+            ("debug_step_into", "dap.step_into"),
+            ("debug_step_out", "dap.step_out"),
+            ("debug_restart", "dap.restart_frame"),
+            ("debug_stop", "dap.terminate"),
+            ("debug_breakpoint", "dap.toggle_breakpoint"),
+        ]
+        .into_iter()
+        .map(|(icon, action)| {
+            Ok(Cell {
+                stretch: 1,
+                widget: Widget::Button(Button::new(Box::new(KeyButton::new_nvim_action_icon(
+                    icon, action,
+                )?))),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?,
+    );
+    let terminal_nvim_debug_layer = FunctionLayer::from_cells(terminal_nvim_debug_cells)
+        .context("building the terminal-nvim-debug layer")?;
+    let terminal_nvim_layer = FunctionLayer::from_cells(vec![
+        Cell {
+            stretch: 1,
+            widget: Widget::Button(Button::new(Box::new(KeyButton::new_nvim_action_text(
+                "Debug",
+                "debug.open",
+            )))),
+        },
+        Cell {
+            stretch: 1,
+            widget: Widget::Button(Button::new(Box::new(KeyButton::new_nvim_action_text(
+                "Test",
+                "neotest.summary_open",
+            )))),
+        },
+        Cell {
+            stretch: 1,
+            widget: Widget::Button(Button::new(Box::new(KeyButton::new_nvim_action_text(
+                "DB",
+                "dbui.open",
+            )))),
+        },
+    ])
+    .context("building the terminal-nvim layer")?;
+    let terminal_nvim_test_layer = FunctionLayer::from_cells(
+        [
+            ("test_run", "neotest.run_nearest"),
+            ("test_debug", "neotest.debug_nearest"),
+            ("test_file", "neotest.run_file"),
+            ("test_stop", "neotest.stop"),
+            ("test_output", "neotest.output_open"),
+        ]
+        .into_iter()
+        .map(|(icon, action)| {
+            Ok(Cell {
+                stretch: 1,
+                widget: Widget::Button(Button::new(Box::new(KeyButton::new_nvim_action_icon(
+                    icon, action,
+                )?))),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?,
+    )
+    .context("building the terminal-nvim-test layer")?;
+    let mut terminal_nvim_db_cells = vec![Cell {
+        stretch: 1,
+        widget: Widget::Button(Button::new(Box::new(KeyButton::new_text(
+            "Connect To".to_string(),
+            Vec::new(),
+            None,
+            Some("terminal-nvim-db-connections".to_string()),
+            false,
+        )))),
+    }];
+    terminal_nvim_db_cells.extend(
+        [
+            ("db_find_buffer", "dbui.find_buffer"),
+            ("db_info", "dbui.last_query_info"),
+        ]
+        .into_iter()
+        .map(|(icon, action)| {
+            Ok(Cell {
+                stretch: 1,
+                widget: Widget::Button(Button::new(Box::new(KeyButton::new_nvim_action_icon(
+                    icon, action,
+                )?))),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?,
+    );
+    let terminal_nvim_db_layer = FunctionLayer::from_cells(terminal_nvim_db_cells)
+        .context("building the terminal-nvim-db layer")?;
+    let terminal_nvim_db_connections_layer = FunctionLayer::from_cells(vec![Cell {
+        stretch: 1,
+        widget: Widget::DbuiConnections(DbuiConnectionsWidget::new()),
+    }])
+    .context("building the terminal-nvim-db-connections layer")?;
     let global_right_tabs_layer = FunctionLayer::with_config(vec![
         ButtonConfig {
             icon: None,
@@ -486,6 +593,14 @@ fn load_config(width: u16) -> Result<(Config, LayerStore)> {
     registry.insert("media-active".to_string(), media_active_layer);
     registry.insert("media-overlay".to_string(), media_overlay_layer);
     registry.insert("chromium-tabs".to_string(), chromium_tabs_layer);
+    registry.insert("terminal-nvim".to_string(), terminal_nvim_layer);
+    registry.insert("terminal-nvim-debug".to_string(), terminal_nvim_debug_layer);
+    registry.insert("terminal-nvim-test".to_string(), terminal_nvim_test_layer);
+    registry.insert("terminal-nvim-db".to_string(), terminal_nvim_db_layer);
+    registry.insert(
+        "terminal-nvim-db-connections".to_string(),
+        terminal_nvim_db_connections_layer,
+    );
     registry.insert(
         "chromium-tabs-overlay".to_string(),
         chromium_tabs_overlay_layer,

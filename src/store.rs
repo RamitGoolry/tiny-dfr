@@ -28,6 +28,45 @@ pub(crate) mod key {
     pub(crate) const CHROMIUM_TABS_JSON: &str = "chromium.tabs.json";
     pub(crate) const CHROMIUM_TABS_COUNT: &str = "chromium.tabs.count";
     pub(crate) const CHROMIUM_TABS_ACTIVE_INDEX: &str = "chromium.tabs.active_index";
+    pub(crate) const NVIM_BRIDGE_AVAILABLE: &str = "nvim.bridge.available";
+    pub(crate) const NVIM_BRIDGE_SOCKET: &str = "nvim.bridge.socket";
+    pub(crate) const NVIM_PID: &str = "nvim.pid";
+    pub(crate) const NVIM_CWD: &str = "nvim.cwd";
+    pub(crate) const NVIM_FILE: &str = "nvim.file";
+    pub(crate) const NVIM_FILETYPE: &str = "nvim.filetype";
+    pub(crate) const NVIM_MODE: &str = "nvim.mode";
+    pub(crate) const NVIM_DAP_ACTIVE: &str = "nvim.dap.active";
+    pub(crate) const NVIM_DAP_STATE: &str = "nvim.dap.state";
+    pub(crate) const NVIM_DAP_ADAPTER: &str = "nvim.dap.adapter";
+    pub(crate) const NVIM_DAP_SESSION: &str = "nvim.dap.session";
+    pub(crate) const NVIM_DAPUI_AVAILABLE: &str = "nvim.dapui.available";
+    pub(crate) const NVIM_DAPUI_VISIBLE: &str = "nvim.dapui.visible";
+    pub(crate) const NVIM_NEOTEST_AVAILABLE: &str = "nvim.neotest.available";
+    pub(crate) const NVIM_NEOTEST_SUMMARY_VISIBLE: &str = "nvim.neotest.summary_visible";
+    pub(crate) const NVIM_NEOTEST_UPDATED_AT_MS: &str = "nvim.neotest.updated_at_ms";
+    pub(crate) const NVIM_DBUI_AVAILABLE: &str = "nvim.dbui.available";
+    pub(crate) const NVIM_DBUI_VISIBLE: &str = "nvim.dbui.visible";
+    pub(crate) const NVIM_DBUI_IN_BUFFER: &str = "nvim.dbui.in_buffer";
+    pub(crate) const NVIM_DBUI_CONNECTIONS_JSON: &str = "nvim.dbui.connections_json";
+    pub(crate) const TERMINAL_AVAILABLE: &str = "terminal.available";
+    pub(crate) const TERMINAL_NAME: &str = "terminal.name";
+    pub(crate) const TERMINAL_KIND: &str = "terminal.kind";
+    pub(crate) const TERMINAL_ROOT_PID: &str = "terminal.root_pid";
+    pub(crate) const TERMINAL_COMMAND: &str = "terminal.command";
+    pub(crate) const TERMINAL_CWD: &str = "terminal.cwd";
+    pub(crate) const TERMINAL_APP: &str = "terminal.app";
+    pub(crate) const TERMINAL_APP_PID: &str = "terminal.app_pid";
+    pub(crate) const TERMINAL_NVIM_PID: &str = "terminal.nvim_pid";
+    pub(crate) const TERMINAL_TMUX_CLIENT_PID: &str = "terminal.tmux.client_pid";
+    pub(crate) const TERMINAL_TMUX_CLIENT_TTY: &str = "terminal.tmux.client_tty";
+    pub(crate) const TERMINAL_TMUX_SESSION: &str = "terminal.tmux.session";
+    pub(crate) const TERMINAL_TMUX_WINDOW: &str = "terminal.tmux.window";
+    pub(crate) const TERMINAL_TMUX_PANE_INDEX: &str = "terminal.tmux.pane_index";
+    pub(crate) const TERMINAL_TMUX_PANE_ID: &str = "terminal.tmux.pane_id";
+    pub(crate) const TERMINAL_TMUX_PANE_PID: &str = "terminal.tmux.pane_pid";
+    pub(crate) const TERMINAL_TMUX_PANE_COMMAND: &str = "terminal.tmux.pane_command";
+    pub(crate) const TERMINAL_TMUX_PANE_PATH: &str = "terminal.tmux.pane_path";
+    pub(crate) const TERMINAL_TMUX_PANE_TITLE: &str = "terminal.tmux.pane_title";
 }
 
 /// Validated dotted state key, e.g. `hardware.brightness`.

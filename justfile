@@ -3,6 +3,8 @@
 # Rebuild (release), install the binary, restart the running daemon.
 install: build
     sudo install -Dm755 target/release/tiny-dfr /usr/bin/tiny-dfr
+    sudo install -Dm644 share/tiny-dfr/*.svg -t /usr/share/tiny-dfr/
+    sudo install -Dm644 share/tiny-dfr/config.toml /usr/share/tiny-dfr/config.toml
     systemctl --user restart tiny-dfr || echo "(no user service — relaunch tiny-dfr in your session)"
 
 # Release build.

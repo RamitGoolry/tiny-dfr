@@ -13,7 +13,7 @@ use drm::control::ClipRect;
 
 use crate::action::{Action, Edge};
 use crate::config::{ButtonConfig, Config};
-use crate::store::Store;
+use crate::store::{key, Store};
 use crate::widgets::{ButtonBackend, Region};
 use crate::{dbg_ts, BUTTON_COLOR_ACTIVE, BUTTON_COLOR_INACTIVE, DEFAULT_ICON_SIZE};
 
@@ -38,6 +38,13 @@ pub(crate) struct Button {
 
 /// The default button behavior: render a static image and emit configured keys
 /// on press/release, or open a modal layer instead of sending a key.
+pub(crate) struct DapContinuePauseButton {
+    continue_icon: ButtonImage,
+    pause_icon: ButtonImage,
+    icon_width: f64,
+    icon_height: f64,
+}
+
 pub(crate) struct KeyButton {
     keys: Vec<Key>,
     content: ButtonImage,
@@ -50,6 +57,8 @@ pub(crate) struct KeyButton {
     push_layer: Option<String>,
     /// If set, pressing this button closes the current transient layer.
     pop_layer: bool,
+    /// If set, pressing this button sends a one-shot action to the local nvim bridge.
+    nvim_action: Option<String>,
 }
 
 fn try_load_svg(path: &str) -> Result<ButtonImage> {
@@ -141,6 +150,69 @@ pub(crate) fn try_load_image(
     Err(last_err.context(format!("failed loading all possible paths for icon {name}")))
 }
 
+impl DapContinuePauseButton {
+    pub(crate) fn new() -> Result<DapContinuePauseButton> {
+        let icon_width = DEFAULT_ICON_SIZE;
+        let icon_height = DEFAULT_ICON_SIZE;
+        Ok(DapContinuePauseButton {
+            continue_icon: try_load_image("debug_continue", None::<&str>, icon_width, icon_height)?,
+            pause_icon: try_load_image("debug_pause", None::<&str>, icon_width, icon_height)?,
+            icon_width: icon_width as f64,
+            icon_height: icon_height as f64,
+        })
+    }
+
+    fn running(store: &Store) -> bool {
+        store.text(key::NVIM_DAP_STATE).unwrap_or("") == "running"
+    }
+
+    fn render_icon(&self, c: &Context, r: &Region, icon: &ButtonImage) {
+        match icon {
+            ButtonImage::Svg(svg) => {
+                let x = r.left + (r.width / 2.0 - self.icon_width / 2.0).round();
+                let y = r.y_shift + ((r.height as f64 - self.icon_height) / 2.0).round();
+                svg.render_document(c, &Rectangle::new(x, y, self.icon_width, self.icon_height))
+                    .unwrap();
+            }
+            ButtonImage::Bitmap(surf) => {
+                let x = r.left + (r.width / 2.0 - self.icon_width / 2.0).round();
+                let y = r.y_shift + ((r.height as f64 - self.icon_height) / 2.0).round();
+                c.set_source_surface(surf, x, y).unwrap();
+                c.rectangle(x, y, self.icon_width, self.icon_height);
+                c.fill().unwrap();
+            }
+            ButtonImage::Text(_) => {}
+        }
+    }
+}
+
+impl ButtonBackend for DapContinuePauseButton {
+    fn draw_content(&self, c: &Context, r: &Region, store: &Store) {
+        let icon = if Self::running(store) {
+            &self.pause_icon
+        } else {
+            &self.continue_icon
+        };
+        self.render_icon(c, r, icon);
+    }
+
+    fn on_press(&mut self, store: &Store) -> Option<Action> {
+        if Self::running(store) {
+            Some(Action::NvimBridge("dap.pause".to_string()))
+        } else {
+            Some(Action::NvimBridge("dap.continue".to_string()))
+        }
+    }
+
+    fn on_release(&mut self, _store: &Store) -> Option<Action> {
+        None
+    }
+
+    fn needs_redraw(&self, store: &Store) -> bool {
+        store.is_dirty(key::NVIM_DAP_STATE).unwrap_or(false)
+    }
+}
+
 impl KeyButton {
     pub(crate) fn new_text(
         text: String,
@@ -157,6 +229,7 @@ impl KeyButton {
             open_layer,
             push_layer,
             pop_layer,
+            nvim_action: None,
         }
     }
     #[allow(clippy::too_many_arguments)]
@@ -179,8 +252,43 @@ impl KeyButton {
             open_layer,
             push_layer,
             pop_layer,
+            nvim_action: None,
         })
     }
+    pub(crate) fn new_nvim_action_text(
+        text: impl Into<String>,
+        action: impl Into<String>,
+    ) -> KeyButton {
+        KeyButton {
+            keys: Vec::new(),
+            content: ButtonImage::Text(text.into()),
+            icon_width: 0.0,
+            icon_height: 0.0,
+            open_layer: None,
+            push_layer: None,
+            pop_layer: false,
+            nvim_action: Some(action.into()),
+        }
+    }
+
+    pub(crate) fn new_nvim_action_icon(
+        icon: impl AsRef<str>,
+        action: impl Into<String>,
+    ) -> Result<KeyButton> {
+        let icon_width = DEFAULT_ICON_SIZE;
+        let icon_height = DEFAULT_ICON_SIZE;
+        Ok(KeyButton {
+            keys: Vec::new(),
+            content: try_load_image(icon, None::<&str>, icon_width, icon_height)?,
+            icon_width: icon_width as f64,
+            icon_height: icon_height as f64,
+            open_layer: None,
+            push_layer: None,
+            pop_layer: false,
+            nvim_action: Some(action.into()),
+        })
+    }
+
     fn render(
         &self,
         c: &Context,
@@ -238,6 +346,8 @@ impl ButtonBackend for KeyButton {
             Some(Action::PushLayer(layer.clone()))
         } else if self.pop_layer {
             Some(Action::PopLayer)
+        } else if let Some(action) = &self.nvim_action {
+            Some(Action::NvimBridge(action.clone()))
         } else if self.keys.is_empty() {
             None
         } else {
@@ -248,6 +358,7 @@ impl ButtonBackend for KeyButton {
         if self.open_layer.is_some()
             || self.push_layer.is_some()
             || self.pop_layer
+            || self.nvim_action.is_some()
             || self.keys.is_empty()
         {
             None
@@ -258,6 +369,10 @@ impl ButtonBackend for KeyButton {
 }
 
 impl Button {
+    pub(crate) fn changed(&self, store: &Store) -> bool {
+        self.changed || self.backend.needs_redraw(store)
+    }
+
     pub(crate) fn new(backend: Box<dyn ButtonBackend>) -> Button {
         Button {
             changed: false,
@@ -301,7 +416,13 @@ impl Button {
         let action = self.backend.on_press(store);
         if matches!(
             action,
-            Some(Action::OpenModal(_) | Action::PushLayer(_) | Action::PopLayer)
+            Some(
+                Action::OpenModal(_)
+                    | Action::PushLayer(_)
+                    | Action::PopLayer
+                    | Action::NvimBridge(_)
+                    | Action::NvimDbConnect(_),
+            )
         ) {
             return action;
         }
