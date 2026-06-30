@@ -1,8 +1,6 @@
-//! The application hub: owns the bar's state, the redraw/dispatch bookkeeping, and
-//! the single effectful site (`apply`). `real_main` opens the root resources, drops
-//! privileges, builds an `App`, and then just feeds it I/O events from the epoll
-//! loop. Everything here is a verbatim lift of the old `real_main` loop bodies, with
-//! the moved locals turned into `self.` fields — behaviour is unchanged.
+//! The application hub: owns the reactive Store, layer resolution, redraw/dispatch
+//! bookkeeping, and the single effectful site (`apply`). `real_main` owns epoll and
+//! source-specific polling, then feeds normalized [`AppEvent`]s into `App`.
 use ::input::event::{
     keyboard::{KeyState, KeyboardEvent, KeyboardEventTrait},
     Event,
@@ -52,7 +50,7 @@ pub(crate) struct App {
     backlight: BacklightManager,
     /// Keyboard backlight LED, driven by the keyboard-illumination slider.
     kbd: KbdBacklight,
-    /// ALSA Master mixer, driven by the volume slider.
+    /// PipeWire default sink volume, driven by the volume slider.
     volume: VolumeMixer,
     uinput: UInputHandle<File>,
     cfg: Config,

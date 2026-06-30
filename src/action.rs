@@ -19,7 +19,7 @@ pub(crate) enum Action {
     SetBrightness(f64),
     /// Set the keyboard backlight to `level` (0.0..=1.0).
     SetKbdIllum(f64),
-    /// Set the system (ALSA Master) volume to `level` (0.0..=1.0).
+    /// Set the default PipeWire sink volume to `level` (0.0..=1.0).
     SetVolume(f64),
     /// Enter the named layer as a momentary modal (e.g. a slider).
     OpenModal(String),
