@@ -1,5 +1,7 @@
+use crate::app_bridge::{self, AppBridgeState};
+use anyhow::{anyhow, Result};
 use serde::Deserialize;
-use std::{env, fs, path::PathBuf};
+use serde_json::{Map, Value as JsonValue};
 
 #[derive(Clone, Debug, Default, Deserialize)]
 pub(crate) struct PiState {
@@ -10,6 +12,35 @@ pub(crate) struct PiState {
     pub(crate) workflow_mode: Option<String>,
     pub(crate) cwd: Option<String>,
     pub(crate) updated_at_ms: Option<i64>,
+    #[serde(skip)]
+    pub(crate) app_bridge_socket: Option<String>,
+    #[serde(skip)]
+    pub(crate) capabilities: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+struct PiAppState {
+    provider: Option<String>,
+    model: Option<String>,
+    thinking: Option<String>,
+    workflow_mode: Option<String>,
+}
+
+impl PiState {
+    fn from_app_bridge(state: AppBridgeState) -> Option<PiState> {
+        let app: PiAppState = serde_json::from_value(state.state.clone()).ok()?;
+        Some(PiState {
+            pid: state.pid?,
+            model: app.model,
+            provider: app.provider,
+            thinking: app.thinking,
+            workflow_mode: app.workflow_mode,
+            cwd: state.cwd,
+            updated_at_ms: state.updated_at_ms,
+            app_bridge_socket: state.socket,
+            capabilities: state.capabilities,
+        })
+    }
 }
 
 #[derive(Debug, Default)]
@@ -29,6 +60,45 @@ impl PiStateClient {
     ) -> Option<PiState> {
         self.states = discover_states();
         select_state(&self.states, preferred_pid, preferred_cwd).cloned()
+    }
+
+    pub(crate) fn can_send_action(
+        &mut self,
+        action: &str,
+        preferred_pid: Option<u32>,
+        preferred_cwd: Option<&str>,
+    ) -> bool {
+        if self.states.is_empty() {
+            self.states = discover_states();
+        }
+        select_state(&self.states, preferred_pid, preferred_cwd).is_some_and(|state| {
+            state
+                .app_bridge_socket
+                .as_deref()
+                .is_some_and(|socket| !socket.is_empty())
+                && state
+                    .capabilities
+                    .iter()
+                    .any(|capability| capability == action)
+        })
+    }
+
+    pub(crate) fn send_action(
+        &mut self,
+        action: &str,
+        preferred_pid: Option<u32>,
+        preferred_cwd: Option<&str>,
+    ) -> Result<()> {
+        if self.states.is_empty() {
+            self.states = discover_states();
+        }
+        let state = select_state(&self.states, preferred_pid, preferred_cwd)
+            .ok_or_else(|| anyhow!("no pi app bridge state is available"))?;
+        let socket = state
+            .app_bridge_socket
+            .as_deref()
+            .ok_or_else(|| anyhow!("selected pi state has no app bridge socket"))?;
+        app_bridge::send_action(socket, action, Map::<String, JsonValue>::new())
     }
 }
 
@@ -56,30 +126,8 @@ fn select_state<'a>(
 }
 
 fn discover_states() -> Vec<PiState> {
-    let dir = runtime_root().join("pi");
-    let Ok(entries) = fs::read_dir(dir) else {
-        return Vec::new();
-    };
-    entries
-        .flatten()
-        .filter_map(|entry| {
-            let path = entry.path();
-            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
-                return None;
-            }
-            let raw = fs::read_to_string(path).ok()?;
-            serde_json::from_str::<PiState>(&raw).ok()
-        })
+    app_bridge::discover_app_states(Some("pi"))
+        .into_iter()
+        .filter_map(PiState::from_app_bridge)
         .collect()
-}
-
-fn runtime_root() -> PathBuf {
-    if let Some(dir) = env::var_os("TINY_DFR_RUNTIME_DIR") {
-        return PathBuf::from(dir);
-    }
-    if let Some(dir) = env::var_os("XDG_RUNTIME_DIR") {
-        return PathBuf::from(dir).join("tiny-dfr");
-    }
-    let user = env::var("USER").unwrap_or_else(|_| unsafe { libc::geteuid() }.to_string());
-    PathBuf::from(format!("/tmp/tiny-dfr-{user}"))
 }

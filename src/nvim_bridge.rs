@@ -1,14 +1,9 @@
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
-use std::{
-    env, fs,
-    io::{BufRead, BufReader, Write},
-    os::unix::net::UnixStream,
-    path::PathBuf,
-    time::Duration,
-};
+use serde_json::{Map, Value as JsonValue};
+use std::{fs, path::PathBuf};
 
-const REQUEST_TIMEOUT: Duration = Duration::from_millis(500);
+use crate::app_bridge::{self, AppBridgeState};
 
 #[derive(Clone, Debug, Default, Deserialize)]
 pub(crate) struct NvimDapState {
@@ -49,6 +44,21 @@ pub(crate) struct NvimDbuiState {
     pub(crate) connections: Vec<NvimDbConnection>,
 }
 
+#[derive(Clone, Debug, Default, Deserialize)]
+struct NvimAppState {
+    mode: Option<String>,
+    file: Option<String>,
+    filetype: Option<String>,
+    #[serde(default)]
+    dap: NvimDapState,
+    #[serde(default)]
+    dapui: NvimDapUiState,
+    #[serde(default)]
+    neotest: NvimNeotestState,
+    #[serde(default)]
+    dbui: NvimDbuiState,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub(crate) struct NvimBridgeState {
     pub(crate) pid: u32,
@@ -67,6 +77,24 @@ pub(crate) struct NvimBridgeState {
     pub(crate) dbui: NvimDbuiState,
 }
 
+impl NvimBridgeState {
+    fn from_app_bridge(state: AppBridgeState) -> Option<NvimBridgeState> {
+        let app: NvimAppState = serde_json::from_value(state.state.clone()).ok()?;
+        Some(NvimBridgeState {
+            pid: state.pid?,
+            socket: state.socket?,
+            cwd: state.cwd,
+            mode: app.mode,
+            file: app.file,
+            filetype: app.filetype,
+            dap: app.dap,
+            dapui: app.dapui,
+            neotest: app.neotest,
+            dbui: app.dbui,
+        })
+    }
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct NvimBridgeSnapshot {
     pub(crate) available: bool,
@@ -76,20 +104,6 @@ pub(crate) struct NvimBridgeSnapshot {
 #[derive(Debug, Default)]
 pub(crate) struct NvimBridgeClient {
     states: Vec<NvimBridgeState>,
-}
-
-#[derive(Serialize)]
-struct ActionRequest<'a> {
-    id: &'a str,
-    action: &'a str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    db_key_name: Option<&'a str>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ActionResponse {
-    ok: bool,
-    error: Option<String>,
 }
 
 impl NvimBridgeClient {
@@ -159,34 +173,11 @@ impl NvimBridgeClient {
 }
 
 fn discover_states() -> Vec<NvimBridgeState> {
-    let dir = runtime_dir().join("tiny-dfr/nvim");
-    let Ok(entries) = fs::read_dir(dir) else {
-        return Vec::new();
-    };
-
-    let mut states = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
-            continue;
-        }
-        let Ok(raw) = fs::read_to_string(&path) else {
-            continue;
-        };
-        let Ok(state) = serde_json::from_str::<NvimBridgeState>(&raw) else {
-            continue;
-        };
-        if process_exists(state.pid) && fs::metadata(&state.socket).is_ok() {
-            states.push(state);
-        }
-    }
-    states
-}
-
-fn runtime_dir() -> PathBuf {
-    env::var_os("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(format!("/run/user/{}", unsafe { libc::geteuid() })))
+    app_bridge::discover_app_states(Some("nvim"))
+        .into_iter()
+        .filter_map(NvimBridgeState::from_app_bridge)
+        .filter(|state| process_exists(state.pid) && fs::metadata(&state.socket).is_ok())
+        .collect()
 }
 
 fn process_exists(pid: u32) -> bool {
@@ -219,35 +210,13 @@ fn read_ppid(pid: u32) -> Option<u32> {
 }
 
 fn send_action(socket: &str, action: &str, db_key_name: Option<&str>) -> Result<()> {
-    let mut stream = UnixStream::connect(socket)?;
-    stream.set_read_timeout(Some(REQUEST_TIMEOUT))?;
-    stream.set_write_timeout(Some(REQUEST_TIMEOUT))?;
-
-    let request = ActionRequest {
-        id: "tiny-dfr",
-        action,
-        db_key_name,
-    };
-    let payload = serde_json::to_string(&request)?;
-    stream.write_all(payload.as_bytes())?;
-    stream.write_all(b"\n")?;
-    stream.flush()?;
-
-    let mut reader = BufReader::new(stream);
-    let mut line = String::new();
-    reader.read_line(&mut line)?;
-    if line.trim().is_empty() {
-        return Err(anyhow!("nvim bridge returned an empty response"));
+    let mut params = Map::<String, JsonValue>::new();
+    if let Some(db_key_name) = db_key_name {
+        params.insert(
+            "db_key_name".to_string(),
+            JsonValue::String(db_key_name.to_string()),
+        );
     }
-    let response: ActionResponse = serde_json::from_str(&line)?;
-    if response.ok {
-        Ok(())
-    } else {
-        Err(anyhow!(
-            "nvim bridge action failed: {}",
-            response
-                .error
-                .unwrap_or_else(|| "unknown error".to_string())
-        ))
-    }
+    app_bridge::send_action(socket, action, params)
+        .with_context(|| format!("sending nvim bridge action `{action}` to {socket}"))
 }

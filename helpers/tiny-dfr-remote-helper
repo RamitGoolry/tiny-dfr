@@ -44,6 +44,8 @@ TMUX_FORMAT = (
     "#{pane_current_command}\t#{pane_current_path}\t#{pane_title}"
 )
 
+PROTOCOL = "tiny-dfr.app.v1"
+
 PI_KEY_ACTIONS = {
     "pi.abort": ["Escape"],
     "pi.model": ["C-l"],
@@ -70,6 +72,9 @@ class NvimBridgeCache:
         if not isinstance(state, dict):
             return None
         state.setdefault("state_path", str(path))
+        state = normalize_app_state(state)
+        if not state:
+            return None
         if isinstance(state.get("pid"), int):
             self.pid_paths[state["pid"]] = path
         if state.get("cwd"):
@@ -280,22 +285,69 @@ def tiny_dfr_runtime_root() -> Path:
     return Path(f"/tmp/tiny-dfr-{user}")
 
 
-def latest_pi_state(cwd: str | None = None) -> dict[str, Any] | None:
-    dir_path = tiny_dfr_runtime_root() / "pi"
-    if not dir_path.exists():
+def normalize_app_state(raw: dict[str, Any]) -> dict[str, Any] | None:
+    if raw.get("protocol") != PROTOCOL or raw.get("type", "state") != "state":
         return None
-    states: list[dict[str, Any]] = []
-    try:
-        paths = dir_path.glob("*.json")
-    except Exception:
-        return None
-    for path in paths:
+    app = raw.get("app")
+    payload = raw.get("state") if isinstance(raw.get("state"), dict) else {}
+    normalized: dict[str, Any] = {
+        "instance_id": raw.get("instance_id"),
+        "app": app,
+        "pid": raw.get("pid"),
+        "socket": raw.get("socket"),
+        "cwd": raw.get("cwd"),
+        "surface": raw.get("surface"),
+        "capabilities": raw.get("capabilities") if isinstance(raw.get("capabilities"), list) else [],
+        "updated_at_ms": raw.get("updated_at_ms"),
+        "state_path": raw.get("state_path"),
+    }
+    if app == "nvim":
+        normalized.update(payload)
+        return normalized
+    if app == "pi":
+        normalized.update(payload)
+        return normalized
+    return normalized
+
+
+def app_state_paths(app: str | None = None) -> list[Path]:
+    paths: list[Path] = []
+    seen: set[str] = set()
+    pattern = f"{app}-*.json" if app else "*.json"
+    for root in nvim_bridge_search_roots():
+        apps_dir = root / "apps"
+        if not apps_dir.exists():
+            continue
         try:
-            state = json.loads(path.read_text())
+            candidates = apps_dir.glob(pattern)
         except Exception:
             continue
-        if isinstance(state, dict):
+        for path in candidates:
+            key = str(path)
+            if key not in seen:
+                seen.add(key)
+                paths.append(path)
+    return paths
+
+
+def read_app_states(app: str | None = None) -> list[dict[str, Any]]:
+    states: list[dict[str, Any]] = []
+    for path in app_state_paths(app):
+        try:
+            raw = json.loads(path.read_text())
+        except Exception:
+            continue
+        if not isinstance(raw, dict):
+            continue
+        raw.setdefault("state_path", str(path))
+        state = normalize_app_state(raw)
+        if state:
             states.append(state)
+    return states
+
+
+def latest_pi_state(cwd: str | None = None) -> dict[str, Any] | None:
+    states = read_app_states("pi")
     if cwd:
         for state in states:
             if normalize_path(str(state.get("cwd") or "")) == normalize_path(cwd):
@@ -335,11 +387,11 @@ def candidate_nvim_bridge_state_paths(pid: int, recursive: bool = True) -> list[
             candidates.append(path)
 
     for root in nvim_bridge_search_roots():
-        add(root / "nvim" / f"{pid}.json")
+        add(root / "apps" / f"nvim-{pid}.json")
         if not recursive or not root.exists():
             continue
         try:
-            for path in root.glob(f"nvim/{pid}.json"):
+            for path in root.glob(f"apps/nvim-{pid}.json"):
                 add(path)
         except Exception:
             pass
@@ -354,7 +406,7 @@ def discover_nvim_bridge_states(cache: NvimBridgeCache) -> list[dict[str, Any]]:
         if not root.exists():
             continue
         try:
-            paths = root.glob("nvim/*.json")
+            paths = root.glob("apps/nvim-*.json")
         except Exception:
             continue
         for path in paths:
@@ -408,6 +460,9 @@ def build_context(session_id: str, ssh_tty: str | None, bridge_cache: NvimBridge
             bridge, nvim_match_source = bridge_cache.state_for_cwd(client.get("pane_path"))
         if bridge and bridge.get("pid"):
             nvim_pid = int(bridge["pid"])
+        pi_state = latest_pi_state(client.get("pane_path"))
+        if app != "nvim" and pi_state:
+            app = "pi"
         base.update(
             {
                 "kind": "tmux",
@@ -415,26 +470,27 @@ def build_context(session_id: str, ssh_tty: str | None, bridge_cache: NvimBridge
                 "command": command,
                 "cwd": client.get("pane_path") or "",
                 "tmux": client,
-                "app_pid": nvim_pid or pane_pid,
+                "app_pid": nvim_pid or (pi_state.get("pid") if isinstance(pi_state, dict) else None) or pane_pid,
                 "nvim_pid": nvim_pid,
                 "nvim_match_source": nvim_match_source,
                 "nvim_bridge": bridge,
-                "pi_state": latest_pi_state(client.get("pane_path")) if app == "pi" else None,
+                "pi_state": pi_state if app == "pi" else None,
             }
         )
     else:
+        pi_state = latest_pi_state(os.getcwd())
         base.update(
             {
                 "kind": "direct",
-                "app": "shell",
+                "app": "pi" if pi_state else "shell",
                 "command": command_basename(os.environ.get("SHELL", "sh")),
                 "cwd": os.getcwd(),
                 "tmux": None,
-                "app_pid": None,
+                "app_pid": pi_state.get("pid") if isinstance(pi_state, dict) else None,
                 "nvim_pid": None,
                 "nvim_match_source": "none",
                 "nvim_bridge": None,
-                "pi_state": latest_pi_state(os.getcwd()),
+                "pi_state": pi_state,
             }
         )
     return base
@@ -452,6 +508,41 @@ def send_tmux_keys(pane_id: str | None, keys: list[str]) -> bool:
     return bool(result and result.returncode == 0)
 
 
+def send_app_protocol_action(
+    socket_path: str | None,
+    action: str,
+    request_id: str | None = None,
+    params: dict[str, Any] | None = None,
+) -> bool:
+    if not socket_path:
+        return False
+    payload: dict[str, Any] = {
+        "type": "action",
+        "protocol": PROTOCOL,
+        "id": request_id or f"remote-{int(time.time() * 1000)}",
+        "action": action,
+        "params": params or {},
+    }
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.settimeout(1.0)
+            sock.connect(socket_path)
+            send_json(sock, payload)
+            data = b""
+            while b"\n" not in data:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                data += chunk
+            if not data.strip():
+                return True
+            response = json.loads(data.split(b"\n", 1)[0].decode())
+            return bool(response.get("ok"))
+    except Exception as exc:
+        log(f"app protocol action failed: {exc}")
+        return False
+
+
 def send_nvim_action(
     current_context: dict[str, Any],
     action: str,
@@ -465,20 +556,19 @@ def send_nvim_action(
     if not socket_path and bridge_cache is not None:
         state, _match_source = bridge_cache.state_for_pid(int(pid) if pid else None)
         socket_path = state.get("socket") if isinstance(state, dict) else None
-    if not socket_path:
-        return False
-    payload = {"id": request_id or f"remote-{int(time.time() * 1000)}", "action": action}
+    params: dict[str, Any] = {}
     if db_key_name:
-        payload["db_key_name"] = db_key_name
-    try:
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
-            sock.settimeout(1.0)
-            sock.connect(socket_path)
-            send_json(sock, payload)
-        return True
-    except Exception as exc:
-        log(f"nvim action failed: {exc}")
-        return False
+        params["db_key_name"] = db_key_name
+    return send_app_protocol_action(socket_path, action, request_id, params)
+
+
+def send_pi_action(current_context: dict[str, Any], action: str, request_id: str | None = None) -> bool:
+    pi_state = current_context.get("pi_state")
+    socket_path = pi_state.get("socket") if isinstance(pi_state, dict) else None
+    capabilities = pi_state.get("capabilities") if isinstance(pi_state, dict) else []
+    if isinstance(capabilities, list) and action in capabilities:
+        return send_app_protocol_action(socket_path, action, request_id)
+    return False
 
 
 def handle_action(message: dict[str, Any], current_context: dict[str, Any], bridge_cache: NvimBridgeCache) -> dict[str, Any] | None:
@@ -498,6 +588,10 @@ def handle_action(message: dict[str, Any], current_context: dict[str, Any], brid
             ok = send_tmux_keys(pane_id, [str(key) for key in keys])
             if not ok:
                 error = "failed to send tmux keys"
+        elif isinstance(action, str) and action in {"thinking.cycle", "workflow.toggle", "model.select"}:
+            ok = send_pi_action(current_context, action, request_id)
+            if not ok:
+                error = "failed to send pi protocol action"
         elif isinstance(action, str) and (action.startswith("dap.") or action.startswith("dapui.") or action.startswith("debug.") or action.startswith("neotest.") or action.startswith("dbui.")):
             db_key_name = message.get("db_key_name")
             ok = send_nvim_action(

@@ -1190,6 +1190,16 @@ impl App {
         (pid != 0).then_some(pid)
     }
 
+    fn terminal_app_pid(&self) -> Option<u32> {
+        let pid = self.runtime.number(key::TERMINAL_APP_PID).unwrap_or(0.0) as u32;
+        (pid != 0).then_some(pid)
+    }
+
+    fn terminal_cwd(&self) -> Option<String> {
+        let cwd = self.runtime.text(key::TERMINAL_CWD).unwrap_or("");
+        (!cwd.is_empty()).then(|| cwd.to_string())
+    }
+
     fn nvim_debug_surface_active(&self) -> bool {
         self.effective_terminal_app_is(TerminalApp::Nvim)
             && (self.runtime.bool(key::NVIM_DAP_ACTIVE).unwrap_or(false)
@@ -1666,6 +1676,57 @@ impl App {
                 self.refresh_nvim_bridge()?;
                 self.rstate.modal = None;
                 self.needs_complete_redraw = true;
+            }
+            Action::AppBridge {
+                app,
+                action,
+                fallback_keys,
+                edge,
+            } => {
+                if app == "pi" {
+                    if self.remote_context_active()
+                        && self.remote_app_is(TerminalApp::Pi)
+                        && action != "model.select"
+                    {
+                        if edge == Edge::Press {
+                            self.remote.send_action(&action, None)?;
+                            if self.refresh_remote() {
+                                self.needs_complete_redraw = true;
+                            }
+                        }
+                    } else {
+                        let preferred_pid = self.terminal_app_pid();
+                        let preferred_cwd = self.terminal_cwd();
+                        let can_send = self.pi_state.can_send_action(
+                            &action,
+                            preferred_pid,
+                            preferred_cwd.as_deref(),
+                        );
+                        if can_send {
+                            if edge == Edge::Press {
+                                self.pi_state.send_action(
+                                    &action,
+                                    preferred_pid,
+                                    preferred_cwd.as_deref(),
+                                )?;
+                                self.refresh_pi_state()?;
+                                self.needs_complete_redraw = true;
+                            }
+                        } else if !fallback_keys.is_empty() {
+                            toggle_keys(
+                                &mut self.uinput,
+                                &fallback_keys,
+                                (edge == Edge::Press) as i32,
+                            );
+                        }
+                    }
+                } else if !fallback_keys.is_empty() {
+                    toggle_keys(
+                        &mut self.uinput,
+                        &fallback_keys,
+                        (edge == Edge::Press) as i32,
+                    );
+                }
             }
             Action::PushLayer(layer) => {
                 self.rstate.modal = Some(layer);

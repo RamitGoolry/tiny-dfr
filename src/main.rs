@@ -18,6 +18,7 @@ use udev::MonitorBuilder;
 
 mod action;
 mod app;
+mod app_bridge;
 mod backlight;
 mod battery;
 mod chromium;

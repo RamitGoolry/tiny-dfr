@@ -243,11 +243,21 @@ impl ButtonBackend for PiModelButton {
     }
 
     fn on_press(&mut self, _store: &Store) -> Option<Action> {
-        Some(Action::Key(vec![Key::LeftCtrl, Key::L], Edge::Press))
+        Some(Action::AppBridge {
+            app: "pi".to_string(),
+            action: "model.select".to_string(),
+            fallback_keys: vec![Key::LeftCtrl, Key::L],
+            edge: Edge::Press,
+        })
     }
 
     fn on_release(&mut self, _store: &Store) -> Option<Action> {
-        Some(Action::Key(vec![Key::LeftCtrl, Key::L], Edge::Release))
+        Some(Action::AppBridge {
+            app: "pi".to_string(),
+            action: "model.select".to_string(),
+            fallback_keys: vec![Key::LeftCtrl, Key::L],
+            edge: Edge::Release,
+        })
     }
 
     fn needs_redraw(&self, store: &Store) -> bool {
@@ -267,11 +277,21 @@ impl ButtonBackend for PiThinkingButton {
     }
 
     fn on_press(&mut self, _store: &Store) -> Option<Action> {
-        Some(Action::Key(vec![Key::LeftShift, Key::Tab], Edge::Press))
+        Some(Action::AppBridge {
+            app: "pi".to_string(),
+            action: "thinking.cycle".to_string(),
+            fallback_keys: vec![Key::LeftShift, Key::Tab],
+            edge: Edge::Press,
+        })
     }
 
     fn on_release(&mut self, _store: &Store) -> Option<Action> {
-        Some(Action::Key(vec![Key::LeftShift, Key::Tab], Edge::Release))
+        Some(Action::AppBridge {
+            app: "pi".to_string(),
+            action: "thinking.cycle".to_string(),
+            fallback_keys: vec![Key::LeftShift, Key::Tab],
+            edge: Edge::Release,
+        })
     }
 
     fn needs_redraw(&self, store: &Store) -> bool {
@@ -340,17 +360,21 @@ impl ButtonBackend for PiWorkflowModeButton {
     }
 
     fn on_press(&mut self, _store: &Store) -> Option<Action> {
-        Some(Action::Key(
-            vec![Key::LeftCtrl, Key::LeftShift, Key::M],
-            Edge::Press,
-        ))
+        Some(Action::AppBridge {
+            app: "pi".to_string(),
+            action: "workflow.toggle".to_string(),
+            fallback_keys: vec![Key::LeftCtrl, Key::LeftShift, Key::M],
+            edge: Edge::Press,
+        })
     }
 
     fn on_release(&mut self, _store: &Store) -> Option<Action> {
-        Some(Action::Key(
-            vec![Key::LeftCtrl, Key::LeftShift, Key::M],
-            Edge::Release,
-        ))
+        Some(Action::AppBridge {
+            app: "pi".to_string(),
+            action: "workflow.toggle".to_string(),
+            fallback_keys: vec![Key::LeftCtrl, Key::LeftShift, Key::M],
+            edge: Edge::Release,
+        })
     }
 
     fn needs_redraw(&self, store: &Store) -> bool {

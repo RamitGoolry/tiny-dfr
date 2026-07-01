@@ -35,6 +35,13 @@ pub(crate) enum Action {
     NvimBridge(String),
     /// Connect/open a DBUI query buffer for the configured DB key.
     NvimDbConnect(String),
+    /// Send a protocol action to the selected app bridge, with optional key fallback.
+    AppBridge {
+        app: String,
+        action: String,
+        fallback_keys: Vec<Key>,
+        edge: Edge,
+    },
     /// Open a named layer as a full-bar transient overlay.
     PushLayer(String),
     /// Close the current transient layer and return to the previous bar state.
