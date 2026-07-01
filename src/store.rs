@@ -48,6 +48,10 @@ pub(crate) mod key {
     pub(crate) const NVIM_DBUI_VISIBLE: &str = "nvim.dbui.visible";
     pub(crate) const NVIM_DBUI_IN_BUFFER: &str = "nvim.dbui.in_buffer";
     pub(crate) const NVIM_DBUI_CONNECTIONS_JSON: &str = "nvim.dbui.connections_json";
+    pub(crate) const PI_MODEL: &str = "pi.model";
+    pub(crate) const PI_PROVIDER: &str = "pi.provider";
+    pub(crate) const PI_THINKING: &str = "pi.thinking";
+    pub(crate) const PI_WORKFLOW_MODE: &str = "pi.workflow.mode";
     pub(crate) const TERMINAL_AVAILABLE: &str = "terminal.available";
     pub(crate) const TERMINAL_NAME: &str = "terminal.name";
     pub(crate) const TERMINAL_KIND: &str = "terminal.kind";

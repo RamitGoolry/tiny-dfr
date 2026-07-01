@@ -4,7 +4,7 @@ use crate::layer::LayerStore;
 use crate::widgets::button::KeyButton;
 use crate::widgets::{
     BrightnessSlider, Button, Cell, DapContinuePauseButton, DbuiConnectionsWidget, KbdIllumSlider,
-    VolumeSlider, Widget,
+    PiModelButton, PiThinkingButton, PiWorkflowModeButton, VolumeSlider, Widget,
 };
 use anyhow::{anyhow, Context, Result};
 use cairo::FontFace;
@@ -437,7 +437,7 @@ fn load_config(width: u16) -> Result<(Config, LayerStore)> {
             ("debug_step_out", "dap.step_out"),
             ("debug_restart", "dap.restart_frame"),
             ("debug_stop", "dap.terminate"),
-            ("debug_breakpoint", "dap.toggle_breakpoint"),
+            ("test_bug", "dap.toggle_breakpoint"),
         ]
         .into_iter()
         .map(|(icon, action)| {
@@ -479,8 +479,9 @@ fn load_config(width: u16) -> Result<(Config, LayerStore)> {
     let terminal_nvim_test_layer = FunctionLayer::from_cells(
         [
             ("test_run", "neotest.run_nearest"),
-            ("test_debug", "neotest.debug_nearest"),
+            ("test_bug", "neotest.debug_nearest"),
             ("test_file", "neotest.run_file"),
+            ("test_run_all", "neotest.run_all"),
             ("test_stop", "neotest.stop"),
             ("test_output", "neotest.output_open"),
         ]
@@ -531,54 +532,16 @@ fn load_config(width: u16) -> Result<(Config, LayerStore)> {
     .context("building the terminal-nvim-db-connections layer")?;
     let terminal_pi_layer = FunctionLayer::from_cells(vec![
         Cell {
-            stretch: 1,
-            widget: Widget::Button(Button::new(Box::new(KeyButton::new_text(
-                "Abort".to_string(),
-                vec![Key::Esc],
-                None,
-                None,
-                false,
-            )))),
+            stretch: 2,
+            widget: Widget::Button(Button::new(Box::new(PiModelButton))),
         },
         Cell {
-            stretch: 1,
-            widget: Widget::Button(Button::new(Box::new(KeyButton::new_text(
-                "Model".to_string(),
-                vec![Key::LeftCtrl, Key::L],
-                None,
-                None,
-                false,
-            )))),
+            stretch: 2,
+            widget: Widget::Button(Button::new(Box::new(PiThinkingButton))),
         },
         Cell {
-            stretch: 1,
-            widget: Widget::Button(Button::new(Box::new(KeyButton::new_text(
-                "Think".to_string(),
-                vec![Key::LeftShift, Key::Tab],
-                None,
-                None,
-                false,
-            )))),
-        },
-        Cell {
-            stretch: 1,
-            widget: Widget::Button(Button::new(Box::new(KeyButton::new_text(
-                "Tools".to_string(),
-                vec![Key::LeftCtrl, Key::O],
-                None,
-                None,
-                false,
-            )))),
-        },
-        Cell {
-            stretch: 1,
-            widget: Widget::Button(Button::new(Box::new(KeyButton::new_text(
-                "Thinking".to_string(),
-                vec![Key::LeftCtrl, Key::T],
-                None,
-                None,
-                false,
-            )))),
+            stretch: 2,
+            widget: Widget::Button(Button::new(Box::new(PiWorkflowModeButton::new()?))),
         },
     ])
     .context("building the terminal-pi layer")?;

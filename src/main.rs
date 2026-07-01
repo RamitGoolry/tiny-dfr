@@ -32,6 +32,7 @@ mod kbd_backlight;
 mod layer;
 mod mpris;
 mod nvim_bridge;
+mod pi_state;
 mod pixel_shift;
 mod remote;
 mod store;

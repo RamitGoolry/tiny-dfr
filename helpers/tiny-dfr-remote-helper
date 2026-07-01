@@ -280,6 +280,32 @@ def tiny_dfr_runtime_root() -> Path:
     return Path(f"/tmp/tiny-dfr-{user}")
 
 
+def latest_pi_state(cwd: str | None = None) -> dict[str, Any] | None:
+    dir_path = tiny_dfr_runtime_root() / "pi"
+    if not dir_path.exists():
+        return None
+    states: list[dict[str, Any]] = []
+    try:
+        paths = dir_path.glob("*.json")
+    except Exception:
+        return None
+    for path in paths:
+        try:
+            state = json.loads(path.read_text())
+        except Exception:
+            continue
+        if isinstance(state, dict):
+            states.append(state)
+    if cwd:
+        for state in states:
+            if normalize_path(str(state.get("cwd") or "")) == normalize_path(cwd):
+                return state
+    if states:
+        states.sort(key=lambda state: int(state.get("updated_at_ms") or 0))
+        return states[-1]
+    return None
+
+
 def nvim_bridge_search_roots() -> list[Path]:
     roots: list[Path] = []
     seen: set[str] = set()
@@ -393,6 +419,7 @@ def build_context(session_id: str, ssh_tty: str | None, bridge_cache: NvimBridge
                 "nvim_pid": nvim_pid,
                 "nvim_match_source": nvim_match_source,
                 "nvim_bridge": bridge,
+                "pi_state": latest_pi_state(client.get("pane_path")) if app == "pi" else None,
             }
         )
     else:
@@ -407,6 +434,7 @@ def build_context(session_id: str, ssh_tty: str | None, bridge_cache: NvimBridge
                 "nvim_pid": None,
                 "nvim_match_source": "none",
                 "nvim_bridge": None,
+                "pi_state": latest_pi_state(os.getcwd()),
             }
         )
     return base

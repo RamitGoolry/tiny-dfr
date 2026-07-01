@@ -15,6 +15,7 @@ use std::{
 };
 
 use crate::nvim_bridge::NvimBridgeState;
+use crate::pi_state::PiState;
 
 const ACTION_TIMEOUT: Duration = Duration::from_millis(500);
 const REMOTE_THREAD_IDLE_SLEEP: Duration = Duration::from_millis(20);
@@ -41,6 +42,7 @@ pub(crate) struct RemoteContext {
     pub(crate) updated_at_ms: i64,
     pub(crate) nvim_pid: Option<u32>,
     pub(crate) nvim_bridge: Option<NvimBridgeState>,
+    pub(crate) pi_state: Option<PiState>,
     pub(crate) tmux_match_source: Option<String>,
     pub(crate) nvim_match_source: Option<String>,
     pub(crate) tmux: Option<RemoteTmuxState>,

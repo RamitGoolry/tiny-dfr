@@ -30,6 +30,7 @@ use crate::kbd_backlight::KbdBacklight;
 use crate::layer::{LayerStore, ResolverState, TouchTarget};
 use crate::mpris::{MediaState, MprisClient};
 use crate::nvim_bridge::{NvimBridgeClient, NvimBridgeSnapshot};
+use crate::pi_state::{PiState, PiStateClient};
 use crate::pixel_shift::PixelShiftManager;
 use crate::remote::RemoteClient;
 use crate::store::{key, StateKey, Store, Value};
@@ -77,6 +78,7 @@ pub(crate) struct App {
     terminal: TerminalContextClient,
     remote: RemoteClient,
     nvim: NvimBridgeClient,
+    pi_state: PiStateClient,
     uinput: UInputHandle<File>,
     cfg: Config,
     width: u16,
@@ -110,6 +112,10 @@ fn titles_probably_match(media_title: &str, focused_title: &str) -> bool {
 
 fn initial_terminal_values() -> Vec<(&'static str, Value)> {
     vec![
+        (key::PI_MODEL, Value::Text(String::new())),
+        (key::PI_PROVIDER, Value::Text(String::new())),
+        (key::PI_THINKING, Value::Text(String::new())),
+        (key::PI_WORKFLOW_MODE, Value::Text(String::new())),
         (key::TERMINAL_AVAILABLE, Value::Bool(false)),
         (key::TERMINAL_NAME, Value::Text(String::new())),
         (key::TERMINAL_KIND, Value::Text(String::new())),
@@ -174,6 +180,7 @@ impl App {
         let terminal = TerminalContextClient::new();
         let remote = RemoteClient::new();
         let nvim = NvimBridgeClient::new();
+        let pi_state = PiStateClient::new();
         let mut runtime = Store::new();
         runtime
             .set(
@@ -355,6 +362,7 @@ impl App {
             terminal,
             remote,
             nvim,
+            pi_state,
             uinput,
             cfg,
             width: geometry.width,
@@ -384,6 +392,7 @@ impl App {
         self.refresh_terminal()?;
         let remote_changed = self.refresh_remote();
         self.refresh_nvim_bridge()?;
+        self.refresh_pi_state()?;
         if remote_changed {
             self.needs_complete_redraw = true;
         }
@@ -497,6 +506,7 @@ impl App {
         let old_right = self.global_right_layer();
         let remote_changed = self.refresh_remote();
         self.refresh_nvim_bridge()?;
+        self.refresh_pi_state()?;
         let new_center = self.center_layer().map(str::to_string);
         if remote_changed || old_center != new_center || old_right != self.global_right_layer() {
             self.needs_complete_redraw = true;
@@ -623,6 +633,65 @@ impl App {
         let preferred_pid = self.terminal_nvim_pid();
         let snapshot = self.nvim.refresh(preferred_pid);
         self.store_nvim_bridge(snapshot)
+    }
+
+    fn refresh_pi_state(&mut self) -> Result<()> {
+        if self.remote_context_active() {
+            if let Some(state) = self
+                .remote
+                .latest_context()
+                .and_then(|context| context.pi_state.clone())
+            {
+                return self.store_pi_state(Some(state));
+            }
+        }
+        let preferred_pid = self.runtime.number(key::TERMINAL_APP_PID).unwrap_or(0.0) as u32;
+        let preferred_pid = (preferred_pid != 0).then_some(preferred_pid);
+        let preferred_cwd = self
+            .runtime
+            .text(key::TERMINAL_CWD)
+            .unwrap_or("")
+            .to_string();
+        let state = self.pi_state.refresh(
+            preferred_pid,
+            (!preferred_cwd.is_empty()).then_some(preferred_cwd.as_str()),
+        );
+        if state.is_none() && self.effective_terminal_app_is(TerminalApp::Pi) {
+            // Pi writes its lightweight state file cooperatively. If a write is
+            // briefly missed/delayed, keep the last visible labels instead of
+            // flickering back to blank while the focused app is still Pi.
+            return Ok(());
+        }
+        self.store_pi_state(state)
+    }
+
+    fn store_pi_state(&mut self, state: Option<PiState>) -> Result<()> {
+        if let Some(state) = state {
+            self.runtime
+                .set(key::PI_MODEL, Value::Text(state.model.unwrap_or_default()))?;
+            self.runtime.set(
+                key::PI_PROVIDER,
+                Value::Text(state.provider.unwrap_or_default()),
+            )?;
+            self.runtime.set(
+                key::PI_THINKING,
+                Value::Text(state.thinking.unwrap_or_default()),
+            )?;
+            self.runtime.set(
+                key::PI_WORKFLOW_MODE,
+                Value::Text(state.workflow_mode.unwrap_or_default()),
+            )?;
+        } else {
+            self.runtime
+                .set(key::PI_MODEL, Value::Text(String::new()))?;
+            self.runtime
+                .set(key::PI_PROVIDER, Value::Text(String::new()))?;
+            self.runtime
+                .set(key::PI_THINKING, Value::Text(String::new()))?;
+            self.runtime
+                .set(key::PI_WORKFLOW_MODE, Value::Text(String::new()))?;
+        }
+        Ok(())
     }
 
     fn store_nvim_bridge(&mut self, snapshot: NvimBridgeSnapshot) -> Result<()> {
@@ -1235,6 +1304,12 @@ impl App {
             || self
                 .runtime
                 .is_dirty(key::NVIM_DBUI_CONNECTIONS_JSON)
+                .unwrap_or(false)
+            || self.runtime.is_dirty(key::PI_MODEL).unwrap_or(false)
+            || self.runtime.is_dirty(key::PI_THINKING).unwrap_or(false)
+            || self
+                .runtime
+                .is_dirty(key::PI_WORKFLOW_MODE)
                 .unwrap_or(false)
             || self
                 .store

@@ -10,7 +10,9 @@ pub(crate) mod indicator;
 pub(crate) mod media;
 pub(crate) mod slider;
 
-pub(crate) use button::{Button, DapContinuePauseButton};
+pub(crate) use button::{
+    Button, DapContinuePauseButton, PiModelButton, PiThinkingButton, PiWorkflowModeButton,
+};
 pub(crate) use chromium_tabs::ChromiumTabsWidget;
 pub(crate) use dbui_connections::DbuiConnectionsWidget;
 pub(crate) use media::MediaWidget;
