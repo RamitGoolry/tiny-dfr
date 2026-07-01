@@ -35,25 +35,11 @@ pub struct FunctionLayer {
 }
 
 impl FunctionLayer {
-    pub(crate) fn with_config(cfg: Vec<ButtonConfig>) -> Result<FunctionLayer> {
-        if cfg.is_empty() {
+    pub(crate) fn from_cells(cells: Vec<Cell>) -> Result<FunctionLayer> {
+        if cells.is_empty() {
             return Err(anyhow!("layer has 0 buttons"));
         }
-
-        let mut virtual_button_count = 0;
-        let mut cells = Vec::with_capacity(cfg.len());
-        for cfg in cfg {
-            let mut stretch = cfg.stretch.unwrap_or(1);
-            if stretch < 1 {
-                println!("Stretch value must be at least 1, setting to 1.");
-                stretch = 1;
-            }
-            virtual_button_count += stretch;
-            cells.push(Cell {
-                stretch,
-                widget: Widget::from_config(cfg)?,
-            });
-        }
+        let virtual_button_count = cells.iter().map(|cell| cell.stretch).sum();
         let displays_time = cells.iter().any(|c| c.widget.is_clock());
         let faster_refresh = cells.iter().any(|c| c.widget.needs_faster_refresh());
         Ok(FunctionLayer {
@@ -62,6 +48,26 @@ impl FunctionLayer {
             virtual_button_count,
             faster_refresh,
         })
+    }
+
+    pub(crate) fn with_config(cfg: Vec<ButtonConfig>) -> Result<FunctionLayer> {
+        if cfg.is_empty() {
+            return Err(anyhow!("layer has 0 buttons"));
+        }
+
+        let mut cells = Vec::with_capacity(cfg.len());
+        for cfg in cfg {
+            let mut stretch = cfg.stretch.unwrap_or(1);
+            if stretch < 1 {
+                println!("Stretch value must be at least 1, setting to 1.");
+                stretch = 1;
+            }
+            cells.push(Cell {
+                stretch,
+                widget: Widget::from_config(cfg)?,
+            });
+        }
+        FunctionLayer::from_cells(cells)
     }
     /// A full-bar modal slider layer: one stretched `Slider` cell wrapping the
     /// given backend (brightness, keyboard illumination, volume, …).
@@ -99,6 +105,7 @@ impl FunctionLayer {
             Some(Widget::Button(b)) => b.on_press(store),
             Some(Widget::Media(m)) => m.on_press(x, &region, store),
             Some(Widget::ChromiumTabs(t)) => t.on_press(x, &region, store),
+            Some(Widget::DbuiConnections(dbs)) => dbs.on_press(x, &region, store),
             _ => None,
         }
     }

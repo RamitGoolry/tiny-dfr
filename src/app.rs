@@ -29,8 +29,12 @@ use crate::input::toggle_keys;
 use crate::kbd_backlight::KbdBacklight;
 use crate::layer::{LayerStore, ResolverState, TouchTarget};
 use crate::mpris::{MediaState, MprisClient};
+use crate::nvim_bridge::{NvimBridgeClient, NvimBridgeSnapshot};
+use crate::pi_state::{PiState, PiStateClient};
 use crate::pixel_shift::PixelShiftManager;
+use crate::remote::RemoteClient;
 use crate::store::{key, StateKey, Store, Value};
+use crate::terminal::{TerminalApp, TerminalContextClient, TerminalState};
 use crate::touch::{TouchPhase, TouchSample};
 use crate::volume::VolumeMixer;
 use crate::{dbg_ts, BUTTON_SPACING_PX, TIMEOUT_MS, TOUCH_ACTIVE_POLL_MS};
@@ -42,6 +46,12 @@ const GLOBAL_RIGHT_TABS_LAYER: &str = "global-right-tabs";
 const MEDIA_ACTIVE_LAYER: &str = "media-active";
 const MEDIA_OVERLAY_LAYER: &str = "media-overlay";
 const CHROMIUM_TABS_LAYER: &str = "chromium-tabs";
+const TERMINAL_NVIM_LAYER: &str = "terminal-nvim";
+const TERMINAL_NVIM_DEBUG_LAYER: &str = "terminal-nvim-debug";
+const TERMINAL_NVIM_TEST_LAYER: &str = "terminal-nvim-test";
+const TERMINAL_NVIM_DB_LAYER: &str = "terminal-nvim-db";
+const TERMINAL_NVIM_DB_CONNECTIONS_LAYER: &str = "terminal-nvim-db-connections";
+const TERMINAL_PI_LAYER: &str = "terminal-pi";
 
 pub(crate) struct AppGeometry {
     pub(crate) width: u16,
@@ -65,6 +75,10 @@ pub(crate) struct App {
     volume: VolumeMixer,
     mpris: MprisClient,
     chromium: ChromiumClient,
+    terminal: TerminalContextClient,
+    remote: RemoteClient,
+    nvim: NvimBridgeClient,
+    pi_state: PiStateClient,
     uinput: UInputHandle<File>,
     cfg: Config,
     width: u16,
@@ -75,6 +89,8 @@ pub(crate) struct App {
     needs_complete_redraw: bool,
     /// Last resolved layer name, for the `LAYER {} -> {}` transition log.
     prev_active: String,
+    /// Last terminal context signature, for focused Ghostty/tmux diagnostics.
+    prev_terminal: String,
     /// The time-display redraw throttle: the last second/minute we redrew at.
     last_redraw_ts: u32,
     /// Timestamp of the last Fn press, for the double-press layer-swap timing.
@@ -92,6 +108,34 @@ fn titles_probably_match(media_title: &str, focused_title: &str) -> bool {
     !media.is_empty()
         && !focused.is_empty()
         && (focused.contains(&media) || media.contains(&focused))
+}
+
+fn initial_terminal_values() -> Vec<(&'static str, Value)> {
+    vec![
+        (key::PI_MODEL, Value::Text(String::new())),
+        (key::PI_PROVIDER, Value::Text(String::new())),
+        (key::PI_THINKING, Value::Text(String::new())),
+        (key::PI_WORKFLOW_MODE, Value::Text(String::new())),
+        (key::TERMINAL_AVAILABLE, Value::Bool(false)),
+        (key::TERMINAL_NAME, Value::Text(String::new())),
+        (key::TERMINAL_KIND, Value::Text(String::new())),
+        (key::TERMINAL_ROOT_PID, Value::Number(0.0)),
+        (key::TERMINAL_COMMAND, Value::Text(String::new())),
+        (key::TERMINAL_CWD, Value::Text(String::new())),
+        (key::TERMINAL_APP, Value::Text(String::new())),
+        (key::TERMINAL_APP_PID, Value::Number(0.0)),
+        (key::TERMINAL_NVIM_PID, Value::Number(0.0)),
+        (key::TERMINAL_TMUX_CLIENT_PID, Value::Number(0.0)),
+        (key::TERMINAL_TMUX_CLIENT_TTY, Value::Text(String::new())),
+        (key::TERMINAL_TMUX_SESSION, Value::Text(String::new())),
+        (key::TERMINAL_TMUX_WINDOW, Value::Text(String::new())),
+        (key::TERMINAL_TMUX_PANE_INDEX, Value::Text(String::new())),
+        (key::TERMINAL_TMUX_PANE_ID, Value::Text(String::new())),
+        (key::TERMINAL_TMUX_PANE_PID, Value::Number(0.0)),
+        (key::TERMINAL_TMUX_PANE_COMMAND, Value::Text(String::new())),
+        (key::TERMINAL_TMUX_PANE_PATH, Value::Text(String::new())),
+        (key::TERMINAL_TMUX_PANE_TITLE, Value::Text(String::new())),
+    ]
 }
 
 fn normalize_media_title(title: &str) -> String {
@@ -133,6 +177,10 @@ impl App {
         let volume = VolumeMixer::new();
         let mpris = MprisClient::new();
         let chromium = ChromiumClient::new(None);
+        let terminal = TerminalContextClient::new();
+        let remote = RemoteClient::new();
+        let nvim = NvimBridgeClient::new();
+        let pi_state = PiStateClient::new();
         let mut runtime = Store::new();
         runtime
             .set(
@@ -185,6 +233,74 @@ impl App {
         runtime
             .set(key::CHROMIUM_TABS_ACTIVE_INDEX, Value::Number(-1.0))
             .expect("built-in Store key must be valid");
+        runtime
+            .set(key::NVIM_BRIDGE_AVAILABLE, Value::Bool(false))
+            .expect("built-in Store key must be valid");
+        runtime
+            .set(key::NVIM_BRIDGE_SOCKET, Value::Text(String::new()))
+            .expect("built-in Store key must be valid");
+        runtime
+            .set(key::NVIM_PID, Value::Number(0.0))
+            .expect("built-in Store key must be valid");
+        runtime
+            .set(key::NVIM_CWD, Value::Text(String::new()))
+            .expect("built-in Store key must be valid");
+        runtime
+            .set(key::NVIM_FILE, Value::Text(String::new()))
+            .expect("built-in Store key must be valid");
+        runtime
+            .set(key::NVIM_FILETYPE, Value::Text(String::new()))
+            .expect("built-in Store key must be valid");
+        runtime
+            .set(key::NVIM_MODE, Value::Text(String::new()))
+            .expect("built-in Store key must be valid");
+        runtime
+            .set(key::NVIM_DAP_ACTIVE, Value::Bool(false))
+            .expect("built-in Store key must be valid");
+        runtime
+            .set(key::NVIM_DAP_STATE, Value::Text(String::new()))
+            .expect("built-in Store key must be valid");
+        runtime
+            .set(key::NVIM_DAP_ADAPTER, Value::Text(String::new()))
+            .expect("built-in Store key must be valid");
+        runtime
+            .set(key::NVIM_DAP_SESSION, Value::Text(String::new()))
+            .expect("built-in Store key must be valid");
+        runtime
+            .set(key::NVIM_DAPUI_AVAILABLE, Value::Bool(false))
+            .expect("built-in Store key must be valid");
+        runtime
+            .set(key::NVIM_DAPUI_VISIBLE, Value::Bool(false))
+            .expect("built-in Store key must be valid");
+        runtime
+            .set(key::NVIM_NEOTEST_AVAILABLE, Value::Bool(false))
+            .expect("built-in Store key must be valid");
+        runtime
+            .set(key::NVIM_NEOTEST_SUMMARY_VISIBLE, Value::Bool(false))
+            .expect("built-in Store key must be valid");
+        runtime
+            .set(key::NVIM_NEOTEST_UPDATED_AT_MS, Value::Number(0.0))
+            .expect("built-in Store key must be valid");
+        runtime
+            .set(key::NVIM_DBUI_AVAILABLE, Value::Bool(false))
+            .expect("built-in Store key must be valid");
+        runtime
+            .set(key::NVIM_DBUI_VISIBLE, Value::Bool(false))
+            .expect("built-in Store key must be valid");
+        runtime
+            .set(key::NVIM_DBUI_IN_BUFFER, Value::Bool(false))
+            .expect("built-in Store key must be valid");
+        runtime
+            .set(
+                key::NVIM_DBUI_CONNECTIONS_JSON,
+                Value::Text("[]".to_string()),
+            )
+            .expect("built-in Store key must be valid");
+        for (key, value) in initial_terminal_values() {
+            runtime
+                .set(key, value)
+                .expect("built-in Store key must be valid");
+        }
         runtime.clear_dirty();
 
         // uinput virtual-device setup.
@@ -243,6 +359,10 @@ impl App {
             volume,
             mpris,
             chromium,
+            terminal,
+            remote,
+            nvim,
+            pi_state,
             uinput,
             cfg,
             width: geometry.width,
@@ -251,6 +371,7 @@ impl App {
             surface,
             needs_complete_redraw: true,
             prev_active: String::new(),
+            prev_terminal: String::new(),
             last_redraw_ts,
             last,
         }
@@ -268,6 +389,13 @@ impl App {
         let old_right = self.global_right_layer();
         self.refresh_media()?;
         self.refresh_chromium_tabs(false)?;
+        self.refresh_terminal()?;
+        let remote_changed = self.refresh_remote();
+        self.refresh_nvim_bridge()?;
+        self.refresh_pi_state()?;
+        if remote_changed {
+            self.needs_complete_redraw = true;
+        }
         if old_center.as_deref() != self.center_layer() || old_right != self.global_right_layer() {
             self.needs_complete_redraw = true;
         }
@@ -351,6 +479,335 @@ impl App {
         Ok(())
     }
 
+    fn refresh_terminal(&mut self) -> Result<()> {
+        let focused_class = self
+            .runtime
+            .text(key::CONTEXT_FOCUS_CLASS)
+            .unwrap_or("")
+            .to_string();
+        let state = self.terminal.refresh(&focused_class);
+        self.store_terminal(state)
+    }
+
+    pub(crate) fn remote_wake_fd(&self) -> Option<std::os::fd::BorrowedFd<'_>> {
+        self.remote.wake_fd()
+    }
+
+    pub(crate) fn drain_remote_wake(&mut self) -> bool {
+        self.remote.drain_wake()
+    }
+
+    fn refresh_remote(&mut self) -> bool {
+        self.remote.refresh()
+    }
+
+    fn on_remote_changed(&mut self) -> Result<()> {
+        let old_center = self.center_layer().map(str::to_string);
+        let old_right = self.global_right_layer();
+        let remote_changed = self.refresh_remote();
+        self.refresh_nvim_bridge()?;
+        self.refresh_pi_state()?;
+        let new_center = self.center_layer().map(str::to_string);
+        if remote_changed || old_center != new_center || old_right != self.global_right_layer() {
+            self.needs_complete_redraw = true;
+        }
+        Ok(())
+    }
+
+    fn store_terminal(&mut self, state: TerminalState) -> Result<()> {
+        let signature = format!(
+            "available={} terminal={} kind={} app={} cmd={} app_pid={:?} nvim_pid={:?} tmux_pane={} ghostty_pid_windows={} ambiguous={}",
+            state.available,
+            state.terminal,
+            state.kind.as_str(),
+            state.app.as_str(),
+            state.command,
+            state.app_pid,
+            state.nvim_pid,
+            state
+                .tmux
+                .as_ref()
+                .map(|tmux| tmux.pane_id.as_str())
+                .unwrap_or(""),
+            state.ghostty_pid_window_count,
+            state.ambiguous
+        );
+        if signature != self.prev_terminal {
+            eprintln!("[dbg {:.6}] TERMINAL {signature}", dbg_ts());
+            self.prev_terminal = signature;
+        }
+
+        self.runtime
+            .set(key::TERMINAL_AVAILABLE, Value::Bool(state.available))?;
+        self.runtime
+            .set(key::TERMINAL_NAME, Value::Text(state.terminal))?;
+        self.runtime.set(
+            key::TERMINAL_KIND,
+            Value::Text(state.kind.as_str().to_string()),
+        )?;
+        self.runtime.set(
+            key::TERMINAL_ROOT_PID,
+            Value::Number(state.root_pid.unwrap_or(0) as f64),
+        )?;
+        self.runtime
+            .set(key::TERMINAL_COMMAND, Value::Text(state.command))?;
+        self.runtime
+            .set(key::TERMINAL_CWD, Value::Text(state.cwd))?;
+        self.runtime.set(
+            key::TERMINAL_APP,
+            Value::Text(state.app.as_str().to_string()),
+        )?;
+        self.runtime.set(
+            key::TERMINAL_APP_PID,
+            Value::Number(state.app_pid.unwrap_or(0) as f64),
+        )?;
+        self.runtime.set(
+            key::TERMINAL_NVIM_PID,
+            Value::Number(state.nvim_pid.unwrap_or(0) as f64),
+        )?;
+        if let Some(tmux) = state.tmux {
+            self.runtime.set(
+                key::TERMINAL_TMUX_CLIENT_PID,
+                Value::Number(tmux.client_pid.unwrap_or(0) as f64),
+            )?;
+            self.runtime
+                .set(key::TERMINAL_TMUX_CLIENT_TTY, Value::Text(tmux.client_tty))?;
+            self.runtime
+                .set(key::TERMINAL_TMUX_SESSION, Value::Text(tmux.session))?;
+            self.runtime
+                .set(key::TERMINAL_TMUX_WINDOW, Value::Text(tmux.window))?;
+            self.runtime
+                .set(key::TERMINAL_TMUX_PANE_INDEX, Value::Text(tmux.pane_index))?;
+            self.runtime
+                .set(key::TERMINAL_TMUX_PANE_ID, Value::Text(tmux.pane_id))?;
+            self.runtime.set(
+                key::TERMINAL_TMUX_PANE_PID,
+                Value::Number(tmux.pane_pid.unwrap_or(0) as f64),
+            )?;
+            self.runtime.set(
+                key::TERMINAL_TMUX_PANE_COMMAND,
+                Value::Text(tmux.pane_command),
+            )?;
+            self.runtime
+                .set(key::TERMINAL_TMUX_PANE_PATH, Value::Text(tmux.pane_path))?;
+            self.runtime
+                .set(key::TERMINAL_TMUX_PANE_TITLE, Value::Text(tmux.pane_title))?;
+        } else {
+            self.runtime
+                .set(key::TERMINAL_TMUX_CLIENT_PID, Value::Number(0.0))?;
+            self.runtime
+                .set(key::TERMINAL_TMUX_CLIENT_TTY, Value::Text(String::new()))?;
+            self.runtime
+                .set(key::TERMINAL_TMUX_SESSION, Value::Text(String::new()))?;
+            self.runtime
+                .set(key::TERMINAL_TMUX_WINDOW, Value::Text(String::new()))?;
+            self.runtime
+                .set(key::TERMINAL_TMUX_PANE_INDEX, Value::Text(String::new()))?;
+            self.runtime
+                .set(key::TERMINAL_TMUX_PANE_ID, Value::Text(String::new()))?;
+            self.runtime
+                .set(key::TERMINAL_TMUX_PANE_PID, Value::Number(0.0))?;
+            self.runtime
+                .set(key::TERMINAL_TMUX_PANE_COMMAND, Value::Text(String::new()))?;
+            self.runtime
+                .set(key::TERMINAL_TMUX_PANE_PATH, Value::Text(String::new()))?;
+            self.runtime
+                .set(key::TERMINAL_TMUX_PANE_TITLE, Value::Text(String::new()))?;
+        }
+        Ok(())
+    }
+
+    fn refresh_nvim_bridge(&mut self) -> Result<()> {
+        if self.remote_context_active() {
+            if let Some(state) = self
+                .remote
+                .latest_context()
+                .and_then(|context| context.nvim_bridge.clone())
+            {
+                return self.store_nvim_bridge(NvimBridgeSnapshot {
+                    available: true,
+                    selected: Some(state),
+                });
+            }
+        }
+        let preferred_pid = self.terminal_nvim_pid();
+        let snapshot = self.nvim.refresh(preferred_pid);
+        self.store_nvim_bridge(snapshot)
+    }
+
+    fn refresh_pi_state(&mut self) -> Result<()> {
+        if self.remote_context_active() {
+            if let Some(state) = self
+                .remote
+                .latest_context()
+                .and_then(|context| context.pi_state.clone())
+            {
+                return self.store_pi_state(Some(state));
+            }
+        }
+        let preferred_pid = self.runtime.number(key::TERMINAL_APP_PID).unwrap_or(0.0) as u32;
+        let preferred_pid = (preferred_pid != 0).then_some(preferred_pid);
+        let preferred_cwd = self
+            .runtime
+            .text(key::TERMINAL_CWD)
+            .unwrap_or("")
+            .to_string();
+        let state = self.pi_state.refresh(
+            preferred_pid,
+            (!preferred_cwd.is_empty()).then_some(preferred_cwd.as_str()),
+        );
+        if state.is_none() && self.effective_terminal_app_is(TerminalApp::Pi) {
+            // Pi writes its lightweight state file cooperatively. If a write is
+            // briefly missed/delayed, keep the last visible labels instead of
+            // flickering back to blank while the focused app is still Pi.
+            return Ok(());
+        }
+        self.store_pi_state(state)
+    }
+
+    fn store_pi_state(&mut self, state: Option<PiState>) -> Result<()> {
+        if let Some(state) = state {
+            self.runtime
+                .set(key::PI_MODEL, Value::Text(state.model.unwrap_or_default()))?;
+            self.runtime.set(
+                key::PI_PROVIDER,
+                Value::Text(state.provider.unwrap_or_default()),
+            )?;
+            self.runtime.set(
+                key::PI_THINKING,
+                Value::Text(state.thinking.unwrap_or_default()),
+            )?;
+            self.runtime.set(
+                key::PI_WORKFLOW_MODE,
+                Value::Text(state.workflow_mode.unwrap_or_default()),
+            )?;
+        } else {
+            self.runtime
+                .set(key::PI_MODEL, Value::Text(String::new()))?;
+            self.runtime
+                .set(key::PI_PROVIDER, Value::Text(String::new()))?;
+            self.runtime
+                .set(key::PI_THINKING, Value::Text(String::new()))?;
+            self.runtime
+                .set(key::PI_WORKFLOW_MODE, Value::Text(String::new()))?;
+        }
+        Ok(())
+    }
+
+    fn store_nvim_bridge(&mut self, snapshot: NvimBridgeSnapshot) -> Result<()> {
+        self.runtime
+            .set(key::NVIM_BRIDGE_AVAILABLE, Value::Bool(snapshot.available))?;
+        if let Some(state) = snapshot.selected {
+            let db_surface_active = state.dbui.visible || state.dbui.in_buffer;
+            self.runtime
+                .set(key::NVIM_BRIDGE_SOCKET, Value::Text(state.socket))?;
+            self.runtime
+                .set(key::NVIM_PID, Value::Number(state.pid as f64))?;
+            self.runtime
+                .set(key::NVIM_CWD, Value::Text(state.cwd.unwrap_or_default()))?;
+            self.runtime
+                .set(key::NVIM_FILE, Value::Text(state.file.unwrap_or_default()))?;
+            self.runtime.set(
+                key::NVIM_FILETYPE,
+                Value::Text(state.filetype.unwrap_or_default()),
+            )?;
+            self.runtime
+                .set(key::NVIM_MODE, Value::Text(state.mode.unwrap_or_default()))?;
+            self.runtime
+                .set(key::NVIM_DAP_ACTIVE, Value::Bool(state.dap.active))?;
+            self.runtime.set(
+                key::NVIM_DAP_STATE,
+                Value::Text(state.dap.state.unwrap_or_default()),
+            )?;
+            self.runtime.set(
+                key::NVIM_DAP_ADAPTER,
+                Value::Text(state.dap.adapter.unwrap_or_default()),
+            )?;
+            self.runtime.set(
+                key::NVIM_DAP_SESSION,
+                Value::Text(state.dap.session.unwrap_or_default()),
+            )?;
+            self.runtime.set(
+                key::NVIM_DAPUI_AVAILABLE,
+                Value::Bool(state.dapui.available),
+            )?;
+            self.runtime
+                .set(key::NVIM_DAPUI_VISIBLE, Value::Bool(state.dapui.visible))?;
+            self.runtime.set(
+                key::NVIM_NEOTEST_AVAILABLE,
+                Value::Bool(state.neotest.available),
+            )?;
+            self.runtime.set(
+                key::NVIM_NEOTEST_SUMMARY_VISIBLE,
+                Value::Bool(state.neotest.summary_visible),
+            )?;
+            self.runtime.set(
+                key::NVIM_NEOTEST_UPDATED_AT_MS,
+                Value::Number(state.neotest.updated_at_ms.unwrap_or(0) as f64),
+            )?;
+            self.runtime
+                .set(key::NVIM_DBUI_AVAILABLE, Value::Bool(state.dbui.available))?;
+            self.runtime
+                .set(key::NVIM_DBUI_VISIBLE, Value::Bool(state.dbui.visible))?;
+            self.runtime
+                .set(key::NVIM_DBUI_IN_BUFFER, Value::Bool(state.dbui.in_buffer))?;
+            self.runtime.set(
+                key::NVIM_DBUI_CONNECTIONS_JSON,
+                Value::Text(serde_json::to_string(&state.dbui.connections)?),
+            )?;
+            if !db_surface_active
+                && self.rstate.modal.as_deref() == Some(TERMINAL_NVIM_DB_CONNECTIONS_LAYER)
+            {
+                self.rstate.modal = None;
+                self.needs_complete_redraw = true;
+            }
+        } else {
+            self.runtime
+                .set(key::NVIM_BRIDGE_SOCKET, Value::Text(String::new()))?;
+            self.runtime.set(key::NVIM_PID, Value::Number(0.0))?;
+            self.runtime
+                .set(key::NVIM_CWD, Value::Text(String::new()))?;
+            self.runtime
+                .set(key::NVIM_FILE, Value::Text(String::new()))?;
+            self.runtime
+                .set(key::NVIM_FILETYPE, Value::Text(String::new()))?;
+            self.runtime
+                .set(key::NVIM_MODE, Value::Text(String::new()))?;
+            self.runtime.set(key::NVIM_DAP_ACTIVE, Value::Bool(false))?;
+            self.runtime
+                .set(key::NVIM_DAP_STATE, Value::Text(String::new()))?;
+            self.runtime
+                .set(key::NVIM_DAP_ADAPTER, Value::Text(String::new()))?;
+            self.runtime
+                .set(key::NVIM_DAP_SESSION, Value::Text(String::new()))?;
+            self.runtime
+                .set(key::NVIM_DAPUI_AVAILABLE, Value::Bool(false))?;
+            self.runtime
+                .set(key::NVIM_DAPUI_VISIBLE, Value::Bool(false))?;
+            self.runtime
+                .set(key::NVIM_NEOTEST_AVAILABLE, Value::Bool(false))?;
+            self.runtime
+                .set(key::NVIM_NEOTEST_SUMMARY_VISIBLE, Value::Bool(false))?;
+            self.runtime
+                .set(key::NVIM_NEOTEST_UPDATED_AT_MS, Value::Number(0.0))?;
+            self.runtime
+                .set(key::NVIM_DBUI_AVAILABLE, Value::Bool(false))?;
+            self.runtime
+                .set(key::NVIM_DBUI_VISIBLE, Value::Bool(false))?;
+            self.runtime
+                .set(key::NVIM_DBUI_IN_BUFFER, Value::Bool(false))?;
+            self.runtime.set(
+                key::NVIM_DBUI_CONNECTIONS_JSON,
+                Value::Text("[]".to_string()),
+            )?;
+            if self.rstate.modal.as_deref() == Some(TERMINAL_NVIM_DB_CONNECTIONS_LAYER) {
+                self.rstate.modal = None;
+                self.needs_complete_redraw = true;
+            }
+        }
+        Ok(())
+    }
+
     fn refresh_key(&mut self, key: &StateKey) -> Result<()> {
         match key.as_str() {
             key::HARDWARE_BRIGHTNESS => self.runtime.set(
@@ -403,6 +860,7 @@ impl App {
             AppEvent::Libinput(event) => self.on_libinput(event),
             AppEvent::Touch(sample) => self.on_touch(sample)?,
             AppEvent::FocusChanged { class, title } => self.on_focus(&class, &title),
+            AppEvent::RemoteChanged => self.on_remote_changed()?,
             AppEvent::ConfigReload => {
                 self.reload_config(cfg_mgr, self.width)?;
             }
@@ -460,6 +918,22 @@ impl App {
         }
 
         if self.frame_faster_refresh() {
+            next_timeout_ms = min(next_timeout_ms, 1000);
+        }
+
+        if self.is_ghostty_focused()
+            || self
+                .runtime
+                .bool(key::NVIM_BRIDGE_AVAILABLE)
+                .unwrap_or(false)
+        {
+            next_timeout_ms = min(next_timeout_ms, 500);
+        }
+
+        if self.terminal_app_is(TerminalApp::Ssh)
+            || self.remote_context_active()
+            || self.remote.is_active()
+        {
             next_timeout_ms = min(next_timeout_ms, 1000);
         }
 
@@ -615,7 +1089,36 @@ impl App {
             .filter(|layer| self.store.registry.contains_key(*layer))
             .or_else(|| self.fn_base_center_layer())
             .or_else(|| {
-                if self.is_chromium_focused() {
+                if self.is_ghostty_focused() && self.nvim_debug_surface_active() {
+                    self.store
+                        .registry
+                        .contains_key(TERMINAL_NVIM_DEBUG_LAYER)
+                        .then_some(TERMINAL_NVIM_DEBUG_LAYER)
+                } else if self.is_ghostty_focused() && self.nvim_test_surface_active() {
+                    self.store
+                        .registry
+                        .contains_key(TERMINAL_NVIM_TEST_LAYER)
+                        .then_some(TERMINAL_NVIM_TEST_LAYER)
+                } else if self.is_ghostty_focused() && self.nvim_db_surface_active() {
+                    self.store
+                        .registry
+                        .contains_key(TERMINAL_NVIM_DB_LAYER)
+                        .then_some(TERMINAL_NVIM_DB_LAYER)
+                } else if self.is_ghostty_focused()
+                    && self.effective_terminal_app_is(TerminalApp::Nvim)
+                {
+                    self.store
+                        .registry
+                        .contains_key(TERMINAL_NVIM_LAYER)
+                        .then_some(TERMINAL_NVIM_LAYER)
+                } else if self.is_ghostty_focused()
+                    && self.effective_terminal_app_is(TerminalApp::Pi)
+                {
+                    self.store
+                        .registry
+                        .contains_key(TERMINAL_PI_LAYER)
+                        .then_some(TERMINAL_PI_LAYER)
+                } else if self.is_chromium_focused() {
                     if self.chromium_media_on_focused_tab() {
                         self.store
                             .registry
@@ -644,13 +1147,67 @@ impl App {
         self.store.registry.contains_key(layer).then_some(layer)
     }
 
-    fn is_chromium_focused(&self) -> bool {
-        let class = self
-            .runtime
+    fn focused_class_lower(&self) -> String {
+        self.runtime
             .text(key::CONTEXT_FOCUS_CLASS)
             .unwrap_or("")
-            .to_ascii_lowercase();
+            .to_ascii_lowercase()
+    }
+
+    fn is_chromium_focused(&self) -> bool {
+        let class = self.focused_class_lower();
         class.contains("chromium") || class.contains("chrome")
+    }
+
+    fn is_ghostty_focused(&self) -> bool {
+        self.focused_class_lower().contains("ghostty")
+            || (self.runtime.bool(key::TERMINAL_AVAILABLE).unwrap_or(false)
+                && self.runtime.text(key::TERMINAL_NAME).unwrap_or("") == "ghostty")
+    }
+
+    fn terminal_app_is(&self, app: TerminalApp) -> bool {
+        self.runtime.text(key::TERMINAL_APP).unwrap_or("") == app.as_str()
+    }
+
+    fn remote_context_active(&self) -> bool {
+        self.terminal_app_is(TerminalApp::Ssh) && self.remote.latest_context().is_some()
+    }
+
+    fn remote_app_is(&self, app: TerminalApp) -> bool {
+        self.remote_context_active()
+            && self
+                .remote
+                .latest_context()
+                .is_some_and(|context| context.app == app.as_str())
+    }
+
+    fn effective_terminal_app_is(&self, app: TerminalApp) -> bool {
+        self.terminal_app_is(app) || self.remote_app_is(app)
+    }
+
+    fn terminal_nvim_pid(&self) -> Option<u32> {
+        let pid = self.runtime.number(key::TERMINAL_NVIM_PID).unwrap_or(0.0) as u32;
+        (pid != 0).then_some(pid)
+    }
+
+    fn nvim_debug_surface_active(&self) -> bool {
+        self.effective_terminal_app_is(TerminalApp::Nvim)
+            && (self.runtime.bool(key::NVIM_DAP_ACTIVE).unwrap_or(false)
+                || self.runtime.bool(key::NVIM_DAPUI_VISIBLE).unwrap_or(false))
+    }
+
+    fn nvim_test_surface_active(&self) -> bool {
+        self.effective_terminal_app_is(TerminalApp::Nvim)
+            && self
+                .runtime
+                .bool(key::NVIM_NEOTEST_SUMMARY_VISIBLE)
+                .unwrap_or(false)
+    }
+
+    fn nvim_db_surface_active(&self) -> bool {
+        self.effective_terminal_app_is(TerminalApp::Nvim)
+            && (self.runtime.bool(key::NVIM_DBUI_VISIBLE).unwrap_or(false)
+                || self.runtime.bool(key::NVIM_DBUI_IN_BUFFER).unwrap_or(false))
     }
 
     fn chromium_media_active(&self) -> bool {
@@ -721,6 +1278,38 @@ impl App {
             || self
                 .runtime
                 .is_dirty(key::CHROMIUM_MEDIA_ACTIVE)
+                .unwrap_or(false)
+            || self.runtime.is_dirty(key::NVIM_DAP_ACTIVE).unwrap_or(false)
+            || self.runtime.is_dirty(key::NVIM_DAP_STATE).unwrap_or(false)
+            || self
+                .runtime
+                .is_dirty(key::NVIM_DAPUI_VISIBLE)
+                .unwrap_or(false)
+            || self
+                .runtime
+                .is_dirty(key::NVIM_NEOTEST_AVAILABLE)
+                .unwrap_or(false)
+            || self
+                .runtime
+                .is_dirty(key::NVIM_NEOTEST_SUMMARY_VISIBLE)
+                .unwrap_or(false)
+            || self
+                .runtime
+                .is_dirty(key::NVIM_DBUI_VISIBLE)
+                .unwrap_or(false)
+            || self
+                .runtime
+                .is_dirty(key::NVIM_DBUI_IN_BUFFER)
+                .unwrap_or(false)
+            || self
+                .runtime
+                .is_dirty(key::NVIM_DBUI_CONNECTIONS_JSON)
+                .unwrap_or(false)
+            || self.runtime.is_dirty(key::PI_MODEL).unwrap_or(false)
+            || self.runtime.is_dirty(key::PI_THINKING).unwrap_or(false)
+            || self
+                .runtime
+                .is_dirty(key::PI_WORKFLOW_MODE)
                 .unwrap_or(false)
             || self
                 .store
@@ -916,7 +1505,9 @@ impl App {
                             Action::OpenModal(_)
                                 | Action::PushLayer(_)
                                 | Action::PopLayer
-                                | Action::ChromiumActivateTab(_),
+                                | Action::ChromiumActivateTab(_)
+                                | Action::NvimBridge(_)
+                                | Action::NvimDbConnect(_),
                         )
                     ) {
                         self.touches.insert(
@@ -1047,6 +1638,33 @@ impl App {
             Action::ChromiumActivateTab(id) => {
                 self.chromium.activate_tab(&id)?;
                 self.refresh_chromium_tabs(true)?;
+                self.needs_complete_redraw = true;
+            }
+            Action::NvimBridge(action) => {
+                if self.remote_context_active() && self.remote_app_is(TerminalApp::Nvim) {
+                    self.remote.send_action(&action, None)?;
+                    if self.refresh_remote() {
+                        self.needs_complete_redraw = true;
+                    }
+                } else {
+                    self.nvim.send_action(&action, self.terminal_nvim_pid())?;
+                }
+                self.refresh_nvim_bridge()?;
+                self.needs_complete_redraw = true;
+            }
+            Action::NvimDbConnect(db_key_name) => {
+                if self.remote_context_active() && self.remote_app_is(TerminalApp::Nvim) {
+                    self.remote
+                        .send_action("dbui.connect", Some(&db_key_name))?;
+                    if self.refresh_remote() {
+                        self.needs_complete_redraw = true;
+                    }
+                } else {
+                    self.nvim
+                        .send_db_connect(&db_key_name, self.terminal_nvim_pid())?;
+                }
+                self.refresh_nvim_bridge()?;
+                self.rstate.modal = None;
                 self.needs_complete_redraw = true;
             }
             Action::PushLayer(layer) => {

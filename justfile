@@ -3,6 +3,8 @@
 # Rebuild (release), install the binary, restart the running daemon.
 install: build
     sudo install -Dm755 target/release/tiny-dfr /usr/bin/tiny-dfr
+    sudo install -Dm644 share/tiny-dfr/*.svg -t /usr/share/tiny-dfr/
+    sudo install -Dm644 share/tiny-dfr/config.toml /usr/share/tiny-dfr/config.toml
     systemctl --user restart tiny-dfr || echo "(no user service — relaunch tiny-dfr in your session)"
 
 # Release build.
@@ -35,6 +37,14 @@ setup-udev:
     sudo udevadm trigger --action=add --subsystem-match=backlight --subsystem-match=leds
     sudo usermod -aG input "$USER"
     @echo "added $USER to 'input' — log out/in (or reboot) to apply (backlight works now after a daemon restart)"
+
+# Install the remote SSH/tmux/nvim context helper on an SSH host.
+# Usage: just install-remote-helper optimus
+install-remote-helper host:
+    ssh {{host}} 'mkdir -p ~/.local/bin'
+    scp helpers/tiny-dfr-remote-helper {{host}}:.local/bin/tiny-dfr-remote-helper
+    ssh {{host}} 'chmod +x ~/.local/bin/tiny-dfr-remote-helper && ~/.local/bin/tiny-dfr-remote-helper --help >/dev/null'
+    @echo "installed tiny-dfr-remote-helper on {{host}}:~/.local/bin/tiny-dfr-remote-helper"
 
 # First-time (optional): install + enable the systemd user service.
 setup-service:
