@@ -68,6 +68,8 @@ pub(crate) struct KeyButton {
     pop_layer: bool,
     /// If set, pressing this button sends a one-shot action to the local nvim bridge.
     nvim_action: Option<String>,
+    /// If set, pressing this button launches an app command.
+    launch: Option<String>,
 }
 
 fn try_load_svg(path: &str) -> Result<ButtonImage> {
@@ -104,7 +106,9 @@ pub(crate) fn try_load_image(
     let locations;
 
     // Load list of candidate locations
-    if let Some(theme) = theme {
+    if Path::new(name).is_absolute() {
+        locations = vec![PathBuf::from(name)];
+    } else if let Some(theme) = theme {
         // Freedesktop icons
         let theme = theme.as_ref();
         let candidates = vec![
@@ -399,6 +403,7 @@ impl KeyButton {
             push_layer,
             pop_layer,
             nvim_action: None,
+            launch: None,
         }
     }
     #[allow(clippy::too_many_arguments)]
@@ -422,6 +427,7 @@ impl KeyButton {
             push_layer,
             pop_layer,
             nvim_action: None,
+            launch: None,
         })
     }
     pub(crate) fn new_nvim_action_text(
@@ -437,6 +443,7 @@ impl KeyButton {
             push_layer: None,
             pop_layer: false,
             nvim_action: Some(action.into()),
+            launch: None,
         }
     }
 
@@ -455,6 +462,41 @@ impl KeyButton {
             push_layer: None,
             pop_layer: false,
             nvim_action: Some(action.into()),
+            launch: None,
+        })
+    }
+
+    pub(crate) fn new_launch_text(text: impl Into<String>, launch: impl Into<String>) -> KeyButton {
+        KeyButton {
+            keys: Vec::new(),
+            content: ButtonImage::Text(text.into()),
+            icon_width: 0.0,
+            icon_height: 0.0,
+            open_layer: None,
+            push_layer: None,
+            pop_layer: false,
+            nvim_action: None,
+            launch: Some(launch.into()),
+        }
+    }
+
+    pub(crate) fn new_launch_icon(
+        icon: impl AsRef<str>,
+        theme: Option<impl AsRef<str>>,
+        launch: impl Into<String>,
+        icon_width: i32,
+        icon_height: i32,
+    ) -> Result<KeyButton> {
+        Ok(KeyButton {
+            keys: Vec::new(),
+            content: try_load_image(icon, theme, icon_width, icon_height)?,
+            icon_width: icon_width as f64,
+            icon_height: icon_height as f64,
+            open_layer: None,
+            push_layer: None,
+            pop_layer: false,
+            nvim_action: None,
+            launch: Some(launch.into()),
         })
     }
 
@@ -517,6 +559,8 @@ impl ButtonBackend for KeyButton {
             Some(Action::PopLayer)
         } else if let Some(action) = &self.nvim_action {
             Some(Action::NvimBridge(action.clone()))
+        } else if let Some(command) = &self.launch {
+            Some(Action::LaunchApp(command.clone()))
         } else if self.keys.is_empty() {
             None
         } else {
@@ -528,6 +572,7 @@ impl ButtonBackend for KeyButton {
             || self.push_layer.is_some()
             || self.pop_layer
             || self.nvim_action.is_some()
+            || self.launch.is_some()
             || self.keys.is_empty()
         {
             None
@@ -557,7 +602,22 @@ impl Button {
         let open_layer = cfg.open_layer.clone();
         let push_layer = cfg.push_layer.clone();
         let pop_layer = cfg.pop_layer.unwrap_or(false);
-        let backend = if let Some(text) = cfg.text {
+        let backend = if let Some(launch) = cfg.launch {
+            if let Some(text) = cfg.text {
+                KeyButton::new_launch_text(text, launch)
+            } else {
+                let icon = cfg
+                    .icon
+                    .ok_or_else(|| anyhow!("launch button config requires either text or icon"))?;
+                KeyButton::new_launch_icon(
+                    &icon,
+                    cfg.theme,
+                    launch,
+                    cfg.icon_width.unwrap_or(DEFAULT_ICON_SIZE),
+                    cfg.icon_height.unwrap_or(DEFAULT_ICON_SIZE),
+                )?
+            }
+        } else if let Some(text) = cfg.text {
             KeyButton::new_text(text, cfg.action, open_layer, push_layer, pop_layer)
         } else {
             let icon = cfg
@@ -590,7 +650,8 @@ impl Button {
                     | Action::PushLayer(_)
                     | Action::PopLayer
                     | Action::NvimBridge(_)
-                    | Action::NvimDbConnect(_),
+                    | Action::NvimDbConnect(_)
+                    | Action::LaunchApp(_),
             )
         ) {
             return action;

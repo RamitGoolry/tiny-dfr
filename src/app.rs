@@ -15,6 +15,7 @@ use std::{
     cmp::min,
     collections::HashMap,
     fs::File,
+    process::Command,
     time::{Duration, Instant},
 };
 
@@ -52,6 +53,7 @@ const TERMINAL_NVIM_TEST_LAYER: &str = "terminal-nvim-test";
 const TERMINAL_NVIM_DB_LAYER: &str = "terminal-nvim-db";
 const TERMINAL_NVIM_DB_CONNECTIONS_LAYER: &str = "terminal-nvim-db-connections";
 const TERMINAL_PI_LAYER: &str = "terminal-pi";
+const APP_LAUNCHER_LAYER: &str = "app-launcher";
 
 pub(crate) struct AppGeometry {
     pub(crate) width: u16,
@@ -1089,7 +1091,12 @@ impl App {
             .filter(|layer| self.store.registry.contains_key(*layer))
             .or_else(|| self.fn_base_center_layer())
             .or_else(|| {
-                if self.is_ghostty_focused() && self.nvim_debug_surface_active() {
+                if self.no_app_focused() {
+                    self.store
+                        .registry
+                        .contains_key(APP_LAUNCHER_LAYER)
+                        .then_some(APP_LAUNCHER_LAYER)
+                } else if self.is_ghostty_focused() && self.nvim_debug_surface_active() {
                     self.store
                         .registry
                         .contains_key(TERMINAL_NVIM_DEBUG_LAYER)
@@ -1152,6 +1159,13 @@ impl App {
             .text(key::CONTEXT_FOCUS_CLASS)
             .unwrap_or("")
             .to_ascii_lowercase()
+    }
+
+    fn no_app_focused(&self) -> bool {
+        self.runtime
+            .text(key::CONTEXT_FOCUS_CLASS)
+            .unwrap_or("")
+            .is_empty()
     }
 
     fn is_chromium_focused(&self) -> bool {
@@ -1649,6 +1663,12 @@ impl App {
                 self.chromium.activate_tab(&id)?;
                 self.refresh_chromium_tabs(true)?;
                 self.needs_complete_redraw = true;
+            }
+            Action::LaunchApp(command) => {
+                Command::new("hyprctl")
+                    .args(["dispatch", "exec", &command])
+                    .spawn()
+                    .with_context(|| format!("launching app `{command}`"))?;
             }
             Action::NvimBridge(action) => {
                 if self.remote_context_active() && self.remote_app_is(TerminalApp::Nvim) {
