@@ -245,11 +245,59 @@ def parse_tmux_line(line: str) -> dict[str, Any] | None:
     }
 
 
+def tmux_socket_candidates() -> list[str | None]:
+    candidates: list[str | None] = []
+    seen: set[str] = set()
+
+    def add(socket_path: str | None) -> None:
+        key = socket_path or "<default>"
+        if key not in seen:
+            seen.add(key)
+            candidates.append(socket_path)
+
+    add(None)
+
+    # If launched inside tmux, TMUX is usually
+    # /tmp/tmux-$uid/default,$server_pid,$pane_id.
+    if tmux_env := os.environ.get("TMUX"):
+        socket_path = tmux_env.split(",", 1)[0]
+        if socket_path:
+            add(socket_path)
+
+    uid = os.getuid()
+    for root in [Path(f"/tmp/tmux-{uid}"), Path(os.environ.get("TMPDIR", "")) / f"tmux-{uid}"]:
+        if not root.exists() or not root.is_dir():
+            continue
+        try:
+            for path in root.iterdir():
+                add(str(path))
+        except Exception:
+            continue
+
+    return candidates
+
+
 def list_tmux_clients() -> list[dict[str, Any]]:
-    result = run(["tmux", "list-clients", "-F", TMUX_FORMAT])
-    if not result or result.returncode != 0:
-        return []
-    return [client for line in result.stdout.splitlines() if (client := parse_tmux_line(line))]
+    clients: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for socket_path in tmux_socket_candidates():
+        argv = ["tmux"]
+        if socket_path:
+            argv.extend(["-S", socket_path])
+        argv.extend(["list-clients", "-F", TMUX_FORMAT])
+        result = run(argv)
+        if not result or result.returncode != 0:
+            continue
+        for line in result.stdout.splitlines():
+            client = parse_tmux_line(line)
+            if not client:
+                continue
+            client["tmux_socket"] = socket_path or "default"
+            key = (str(socket_path), str(client.get("client_tty")), str(client.get("pane_id")))
+            if key not in seen:
+                seen.add(key)
+                clients.append(client)
+    return clients
 
 
 def active_tmux_client(ssh_tty: str | None) -> tuple[dict[str, Any] | None, str, int]:
@@ -257,18 +305,20 @@ def active_tmux_client(ssh_tty: str | None) -> tuple[dict[str, Any] | None, str,
     if not clients:
         return None, "none", 0
 
-    # Strongest match when helper is launched from inside an active tmux pane.
+    # Long-running helpers should follow the active pane for this SSH client.
+    # TMUX_PANE is fixed at helper launch time, while client_tty tracks the
+    # attached tmux client whose active pane can change.
+    if ssh_tty:
+        for client in clients:
+            if client.get("client_tty") == ssh_tty:
+                return client, "ssh_tty", len(clients)
+
+    # Fallback when helper is launched from inside tmux but no SSH tty is known.
     tmux_pane = os.environ.get("TMUX_PANE")
     if tmux_pane:
         for client in clients:
             if client.get("pane_id") == tmux_pane:
                 return client, "tmux_pane", len(clients)
-
-    # Normal SSH-shell bootstrap path: match this SSH pty to the tmux client pty.
-    if ssh_tty:
-        for client in clients:
-            if client.get("client_tty") == ssh_tty:
-                return client, "ssh_tty", len(clients)
 
     # Important: do not fall back to an arbitrary global tmux client. If the
     # current SSH session is just a raw shell, unrelated tmux clients can exist on
