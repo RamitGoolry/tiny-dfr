@@ -31,6 +31,8 @@ pub(crate) enum Action {
     MediaSeek(f64),
     /// Activate a Chromium tab by DevTools target id.
     ChromiumActivateTab(String),
+    /// Launch an app command through the compositor.
+    LaunchApp(String),
     /// Send a JSONL action to the selected local Neovim tiny-dfr bridge.
     NvimBridge(String),
     /// Connect/open a DBUI query buffer for the configured DB key.

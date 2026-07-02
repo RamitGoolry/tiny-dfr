@@ -101,6 +101,8 @@ pub struct ButtonConfig {
     pub media: Option<String>,
     pub chromium_tabs: Option<String>,
     pub locale: Option<String>,
+    /// Launch command run through `hyprctl dispatch exec`.
+    pub launch: Option<String>,
     #[serde(deserialize_with = "array_or_single", default)]
     pub action: Vec<Key>,
     pub stretch: Option<usize>,
@@ -192,6 +194,7 @@ fn load_config(width: u16) -> Result<(Config, LayerStore)> {
                     stretch: None,
                     time: None,
                     locale: None,
+                    launch: None,
                     battery: None,
                     media: None,
                     chromium_tabs: None,
@@ -216,6 +219,7 @@ fn load_config(width: u16) -> Result<(Config, LayerStore)> {
         stretch: None,
         time: None,
         locale: None,
+        launch: None,
         battery: None,
         media: None,
         chromium_tabs: None,
@@ -234,6 +238,7 @@ fn load_config(width: u16) -> Result<(Config, LayerStore)> {
         stretch: None,
         time: None,
         locale: None,
+        launch: None,
         battery: None,
         media: None,
         chromium_tabs: None,
@@ -251,6 +256,7 @@ fn load_config(width: u16) -> Result<(Config, LayerStore)> {
         stretch: None,
         time: None,
         locale: None,
+        launch: None,
         battery: None,
         media: None,
         chromium_tabs: None,
@@ -271,6 +277,7 @@ fn load_config(width: u16) -> Result<(Config, LayerStore)> {
             stretch: None,
             time: None,
             locale: None,
+            launch: None,
             battery: None,
             media: None,
             chromium_tabs: None,
@@ -288,6 +295,7 @@ fn load_config(width: u16) -> Result<(Config, LayerStore)> {
             stretch: None,
             time: None,
             locale: None,
+            launch: None,
             battery: None,
             media: None,
             chromium_tabs: None,
@@ -305,6 +313,7 @@ fn load_config(width: u16) -> Result<(Config, LayerStore)> {
             stretch: None,
             time: None,
             locale: None,
+            launch: None,
             battery: None,
             media: None,
             chromium_tabs: None,
@@ -324,6 +333,7 @@ fn load_config(width: u16) -> Result<(Config, LayerStore)> {
         stretch: Some(8),
         time: None,
         locale: None,
+        launch: None,
         battery: None,
         media: Some("active".into()),
         chromium_tabs: None,
@@ -343,6 +353,7 @@ fn load_config(width: u16) -> Result<(Config, LayerStore)> {
             stretch: Some(16),
             time: None,
             locale: None,
+            launch: None,
             battery: None,
             media: Some("active".into()),
             chromium_tabs: None,
@@ -360,6 +371,7 @@ fn load_config(width: u16) -> Result<(Config, LayerStore)> {
             stretch: Some(1),
             time: None,
             locale: None,
+            launch: None,
             battery: None,
             media: None,
             chromium_tabs: None,
@@ -379,6 +391,7 @@ fn load_config(width: u16) -> Result<(Config, LayerStore)> {
         stretch: Some(8),
         time: None,
         locale: None,
+        launch: None,
         battery: None,
         media: None,
         chromium_tabs: Some("active".into()),
@@ -398,6 +411,7 @@ fn load_config(width: u16) -> Result<(Config, LayerStore)> {
             stretch: Some(16),
             time: None,
             locale: None,
+            launch: None,
             battery: None,
             media: None,
             chromium_tabs: Some("active".into()),
@@ -415,6 +429,7 @@ fn load_config(width: u16) -> Result<(Config, LayerStore)> {
             stretch: Some(1),
             time: None,
             locale: None,
+            launch: None,
             battery: None,
             media: None,
             chromium_tabs: None,
@@ -545,6 +560,58 @@ fn load_config(width: u16) -> Result<(Config, LayerStore)> {
         },
     ])
     .context("building the terminal-pi layer")?;
+    let launcher_icon_size = 44;
+    let app_launcher_layer = FunctionLayer::from_cells(vec![
+        Cell {
+            stretch: 4,
+            widget: Widget::Spacer,
+        },
+        Cell {
+            stretch: 1,
+            widget: Widget::Button(Button::new(Box::new(KeyButton::new_launch_icon(
+                "/usr/share/icons/hicolor/128x128/apps/com.mitchellh.ghostty.png",
+                None::<&str>,
+                "ghostty",
+                launcher_icon_size,
+                launcher_icon_size,
+            )?))),
+        },
+        Cell {
+            stretch: 1,
+            widget: Widget::Button(Button::new(Box::new(KeyButton::new_launch_icon(
+                "/usr/share/icons/hicolor/64x64/apps/chromium.png",
+                None::<&str>,
+                "chromium",
+                launcher_icon_size,
+                launcher_icon_size,
+            )?))),
+        },
+        Cell {
+            stretch: 1,
+            widget: Widget::Button(Button::new(Box::new(KeyButton::new_launch_icon(
+                "/usr/share/pixmaps/cider.png",
+                None::<&str>,
+                "cider",
+                launcher_icon_size,
+                launcher_icon_size,
+            )?))),
+        },
+        Cell {
+            stretch: 1,
+            widget: Widget::Button(Button::new(Box::new(KeyButton::new_launch_icon(
+                "/usr/share/icons/hicolor/128x128/apps/org.telegram.desktop.png",
+                None::<&str>,
+                "Telegram",
+                launcher_icon_size,
+                launcher_icon_size,
+            )?))),
+        },
+        Cell {
+            stretch: 4,
+            widget: Widget::Spacer,
+        },
+    ])
+    .context("building the app-launcher layer")?;
     let global_right_tabs_layer = FunctionLayer::with_config(vec![
         ButtonConfig {
             icon: None,
@@ -554,6 +621,7 @@ fn load_config(width: u16) -> Result<(Config, LayerStore)> {
             stretch: None,
             time: None,
             locale: None,
+            launch: None,
             battery: None,
             media: None,
             chromium_tabs: None,
@@ -571,6 +639,7 @@ fn load_config(width: u16) -> Result<(Config, LayerStore)> {
             stretch: None,
             time: None,
             locale: None,
+            launch: None,
             battery: None,
             media: None,
             chromium_tabs: None,
@@ -588,6 +657,7 @@ fn load_config(width: u16) -> Result<(Config, LayerStore)> {
             stretch: None,
             time: None,
             locale: None,
+            launch: None,
             battery: None,
             media: None,
             chromium_tabs: None,
@@ -618,6 +688,7 @@ fn load_config(width: u16) -> Result<(Config, LayerStore)> {
         terminal_nvim_db_connections_layer,
     );
     registry.insert("terminal-pi".to_string(), terminal_pi_layer);
+    registry.insert("app-launcher".to_string(), app_launcher_layer);
     registry.insert(
         "chromium-tabs-overlay".to_string(),
         chromium_tabs_overlay_layer,
