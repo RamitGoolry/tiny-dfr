@@ -581,7 +581,7 @@ fn load_config(width: u16) -> Result<(Config, LayerStore)> {
             widget: Widget::Button(Button::new(Box::new(KeyButton::new_launch_icon(
                 "/usr/share/icons/hicolor/64x64/apps/chromium.png",
                 None::<&str>,
-                "chromium",
+                "chromium --remote-debugging-address=127.0.0.1 --remote-debugging-port=9222",
                 launcher_icon_size,
                 launcher_icon_size,
             )?))),
