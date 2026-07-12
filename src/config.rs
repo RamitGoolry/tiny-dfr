@@ -140,7 +140,7 @@ fn load_font(name: &str) -> Result<FontFace> {
     FontFace::create_from_ft(&face).map_err(|e| anyhow!("creating cairo font face: {e}"))
 }
 
-fn load_config(width: u16) -> Result<(Config, LayerStore)> {
+fn load_config() -> Result<(Config, LayerStore)> {
     let base_str = read_to_string("/usr/share/tiny-dfr/config.toml")
         .context("reading /usr/share/tiny-dfr/config.toml")?;
     let mut base = toml::from_str::<ConfigProxy>(&base_str)
@@ -180,37 +180,12 @@ fn load_config(width: u16) -> Result<(Config, LayerStore)> {
             }
         }
     }
-    let mut media_layer_keys = require(base.media_layer_keys.take(), "MediaLayerKeys")?;
-    let mut primary_layer_keys = require(base.primary_layer_keys.take(), "PrimaryLayerKeys")?;
-    if width >= 2170 {
-        for layer in [&mut media_layer_keys, &mut primary_layer_keys] {
-            layer.insert(
-                0,
-                ButtonConfig {
-                    icon: None,
-                    text: Some("esc".into()),
-                    theme: None,
-                    action: vec![Key::Esc],
-                    stretch: None,
-                    time: None,
-                    locale: None,
-                    launch: None,
-                    battery: None,
-                    media: None,
-                    chromium_tabs: None,
-                    icon_width: None,
-                    icon_height: None,
-                    open_layer: None,
-                    push_layer: None,
-                    pop_layer: None,
-                },
-            );
-        }
-    }
     let media_layer =
-        FunctionLayer::with_config(media_layer_keys).context("building the media layer")?;
+        FunctionLayer::with_config(require(base.media_layer_keys.take(), "MediaLayerKeys")?)
+            .context("building the media layer")?;
     let fkey_layer =
-        FunctionLayer::with_config(primary_layer_keys).context("building the primary layer")?;
+        FunctionLayer::with_config(require(base.primary_layer_keys.take(), "PrimaryLayerKeys")?)
+            .context("building the primary layer")?;
     let global_left_layer = FunctionLayer::with_config(vec![ButtonConfig {
         icon: None,
         text: Some("esc".into()),
@@ -781,17 +756,17 @@ impl ConfigManager {
             watch_desc,
         }
     }
-    pub fn load_config(&self, width: u16) -> Result<(Config, LayerStore)> {
-        load_config(width)
+    pub fn load_config(&self) -> Result<(Config, LayerStore)> {
+        load_config()
     }
-    pub fn update_config(&mut self, cfg: &mut Config, store: &mut LayerStore, width: u16) -> bool {
+    pub fn update_config(&mut self, cfg: &mut Config, store: &mut LayerStore) -> bool {
         if self.watch_desc.is_none() {
             self.watch_desc = arm_inotify(&self.inotify_fd);
             return false;
         }
         match self.inotify_fd.read_events() {
             Err(Errno::EAGAIN) => false,
-            r => self.handle_events(cfg, store, width, r),
+            r => self.handle_events(cfg, store, r),
         }
     }
     #[cold]
@@ -799,7 +774,6 @@ impl ConfigManager {
         &mut self,
         cfg: &mut Config,
         store: &mut LayerStore,
-        width: u16,
         evts: Result<Vec<InotifyEvent>, Errno>,
     ) -> bool {
         let evts = match evts {
@@ -814,7 +788,7 @@ impl ConfigManager {
             if Some(evt.wd) != self.watch_desc {
                 continue;
             }
-            match load_config(width) {
+            match load_config() {
                 Ok((new_cfg, new_store)) => {
                     *cfg = new_cfg;
                     *store = new_store;

@@ -171,7 +171,7 @@ impl App {
         // Fatal at startup: an unloadable config means the daemon cannot run. This
         // runs under `real_main`'s catch_unwind, so the panic paints the crash bar.
         let (cfg, store) = cfg_mgr
-            .load_config(geometry.width)
+            .load_config()
             .unwrap_or_else(|e| panic!("failed to load configuration: {e:#}"));
         let pixel_shift = PixelShiftManager::new();
         let last = Instant::now();
@@ -864,7 +864,7 @@ impl App {
             AppEvent::FocusChanged { class, title } => self.on_focus(&class, &title),
             AppEvent::RemoteChanged => self.on_remote_changed()?,
             AppEvent::ConfigReload => {
-                self.reload_config(cfg_mgr, self.width)?;
+                self.reload_config(cfg_mgr)?;
             }
             AppEvent::Tick => self.tick(),
         }
@@ -873,12 +873,8 @@ impl App {
 
     /// Pick up an inotify config reload: reset the resolver, drop in-flight touches,
     /// and force a full redraw. Returns whether a reload happened.
-    pub(crate) fn reload_config(
-        &mut self,
-        cfg_mgr: &mut ConfigManager,
-        width: u16,
-    ) -> Result<bool> {
-        if cfg_mgr.update_config(&mut self.cfg, &mut self.store, width) {
+    pub(crate) fn reload_config(&mut self, cfg_mgr: &mut ConfigManager) -> Result<bool> {
+        if cfg_mgr.update_config(&mut self.cfg, &mut self.store) {
             self.rstate = ResolverState::default();
             let class = self.runtime.text(key::CONTEXT_FOCUS_CLASS)?.to_string();
             self.rstate.app = self.cfg.app_layers.get(&class).cloned();
