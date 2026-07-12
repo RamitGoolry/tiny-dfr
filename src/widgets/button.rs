@@ -50,8 +50,26 @@ pub(crate) struct PiThinkingButton;
 pub(crate) struct PiWorkflowModeButton {
     plan_icon: ButtonImage,
     build_icon: ButtonImage,
+    auto_icon: ButtonImage,
     icon_width: f64,
     icon_height: f64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WorkflowModePresentation {
+    Plan,
+    Build,
+    Auto,
+    Unknown,
+}
+
+fn workflow_mode_presentation(mode: &str) -> WorkflowModePresentation {
+    match mode {
+        "plan" => WorkflowModePresentation::Plan,
+        "build" => WorkflowModePresentation::Build,
+        "auto" => WorkflowModePresentation::Auto,
+        _ => WorkflowModePresentation::Unknown,
+    }
 }
 
 pub(crate) struct KeyButton {
@@ -310,6 +328,7 @@ impl PiWorkflowModeButton {
         Ok(PiWorkflowModeButton {
             plan_icon: try_load_image("pi_plan", None::<&str>, icon_width, icon_height)?,
             build_icon: try_load_image("pi_build", None::<&str>, icon_width, icon_height)?,
+            auto_icon: try_load_image("pi_auto", None::<&str>, icon_width, icon_height)?,
             icon_width: icon_width as f64,
             icon_height: icon_height as f64,
         })
@@ -347,18 +366,29 @@ impl PiWorkflowModeButton {
 impl ButtonBackend for PiWorkflowModeButton {
     fn draw_content(&self, c: &Context, r: &Region, store: &Store) {
         let mode = store.text(key::PI_WORKFLOW_MODE).unwrap_or("");
-        match mode {
-            "plan" => {
+        match workflow_mode_presentation(mode) {
+            WorkflowModePresentation::Plan => {
                 c.set_source_rgb(196.0 / 255.0, 181.0 / 255.0, 253.0 / 255.0);
                 self.draw_icon_text(c, r, "Plan", &self.plan_icon);
             }
-            "build" => {
+            WorkflowModePresentation::Build => {
                 c.set_source_rgb(96.0 / 255.0, 165.0 / 255.0, 250.0 / 255.0);
                 self.draw_icon_text(c, r, "Build", &self.build_icon);
             }
-            _ => {
+            WorkflowModePresentation::Auto => {
+                c.set_source_rgb(250.0 / 255.0, 204.0 / 255.0, 21.0 / 255.0);
+                self.draw_icon_text(c, r, "Auto", &self.auto_icon);
+            }
+            WorkflowModePresentation::Unknown => {
                 c.set_source_rgb(1.0, 1.0, 1.0);
-                draw_centered_text(c, "Plan / Build", r.height, r.left, r.width, r.y_shift);
+                draw_centered_text(
+                    c,
+                    "Plan / Build / Auto",
+                    r.height,
+                    r.left,
+                    r.width,
+                    r.y_shift,
+                );
             }
         }
     }
@@ -775,5 +805,30 @@ impl Button {
             )]
         };
         Ok(clips)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{workflow_mode_presentation, WorkflowModePresentation};
+
+    #[test]
+    fn recognizes_all_workflow_mode_presentations() {
+        assert_eq!(
+            workflow_mode_presentation("plan"),
+            WorkflowModePresentation::Plan
+        );
+        assert_eq!(
+            workflow_mode_presentation("build"),
+            WorkflowModePresentation::Build
+        );
+        assert_eq!(
+            workflow_mode_presentation("auto"),
+            WorkflowModePresentation::Auto
+        );
+        assert_eq!(
+            workflow_mode_presentation(""),
+            WorkflowModePresentation::Unknown
+        );
     }
 }
