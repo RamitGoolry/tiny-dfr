@@ -21,7 +21,7 @@ mod app;
 mod app_bridge;
 mod backlight;
 mod battery;
-mod chromium;
+mod browser;
 mod config;
 mod context;
 mod display;

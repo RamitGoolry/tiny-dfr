@@ -57,6 +57,32 @@ The class is the Hyprland `class` (see `hyprctl activewindow`). Values are layer
 names from the registry (today: `media`, `fkeys`). An unmapped app falls back to
 the base layer.
 
+## Browser tabs
+
+tiny-dfr selects a browser backend from the focused Hyprland window class:
+
+- Chromium/Chrome use the HTTP Chrome DevTools Protocol target endpoints.
+- Zen/Firefox use WebDriver BiDi over WebSocket.
+
+Both backends default to port `9222`. The built-in empty-workspace launcher starts
+Zen with the required remote agent:
+
+```sh
+zen-browser --remote-debugging-port=9222
+```
+
+The debugging flag only takes effect when the browser process starts. If Zen is
+already running without it, fully quit Zen before launching it from tiny-dfr (or
+start it with the command above). tiny-dfr persists Zen's active BiDi session ID
+under `$XDG_RUNTIME_DIR/tiny-dfr/` so service restarts reattach instead of trying
+to create a second Firefox session. It also reads the active HTML media element
+over BiDi when Zen omits duration or position from MPRIS. The launcher expects
+the packaged executable `zen-browser` and icon
+`/usr/share/icons/hicolor/64x64/apps/zen-browser.png`.
+
+Custom layers can use `{ BrowserTabs = "active" }`; the old `ChromiumTabs` key is
+still accepted as an alias.
+
 ## License
 
 tiny-dfr is licensed under the MIT license, as included in the [LICENSE](LICENSE) file.

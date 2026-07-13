@@ -29,8 +29,8 @@ pub(crate) enum Action {
     MediaNext,
     /// Seek the active MPRIS player to an absolute position in microseconds.
     MediaSeek(f64),
-    /// Activate a Chromium tab by DevTools target id.
-    ChromiumActivateTab(String),
+    /// Activate a browser tab through the currently selected protocol backend.
+    BrowserActivateTab(String),
     /// Launch an app command through the compositor.
     LaunchApp(String),
     /// Send a JSONL action to the selected local Neovim tiny-dfr bridge.

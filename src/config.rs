@@ -62,6 +62,18 @@ struct LayerConfig {
     keys: Vec<ButtonConfig>,
 }
 
+fn canonicalize_app_layers(app_layers: &mut Option<HashMap<String, String>>) {
+    for layer in app_layers
+        .as_mut()
+        .into_iter()
+        .flat_map(HashMap::values_mut)
+    {
+        if layer == "chromium-tabs" {
+            *layer = "browser-tabs".to_string();
+        }
+    }
+}
+
 fn array_or_single<'de, D>(deserializer: D) -> Result<Vec<Key>, D::Error>
 where
     D: Deserializer<'de>,
@@ -99,7 +111,8 @@ pub struct ButtonConfig {
     pub time: Option<String>,
     pub battery: Option<String>,
     pub media: Option<String>,
-    pub chromium_tabs: Option<String>,
+    #[serde(alias = "ChromiumTabs")]
+    pub browser_tabs: Option<String>,
     pub locale: Option<String>,
     /// Launch command run through `hyprctl dispatch exec`.
     pub launch: Option<String>,
@@ -197,7 +210,7 @@ fn load_config() -> Result<(Config, LayerStore)> {
         launch: None,
         battery: None,
         media: None,
-        chromium_tabs: None,
+        browser_tabs: None,
         icon_width: None,
         icon_height: None,
         open_layer: None,
@@ -216,7 +229,7 @@ fn load_config() -> Result<(Config, LayerStore)> {
         launch: None,
         battery: None,
         media: None,
-        chromium_tabs: None,
+        browser_tabs: None,
         icon_width: None,
         icon_height: None,
         open_layer: Some("volume".into()),
@@ -234,7 +247,7 @@ fn load_config() -> Result<(Config, LayerStore)> {
         launch: None,
         battery: None,
         media: None,
-        chromium_tabs: None,
+        browser_tabs: None,
         icon_width: None,
         icon_height: None,
         open_layer: Some("brightness".into()),
@@ -255,7 +268,7 @@ fn load_config() -> Result<(Config, LayerStore)> {
             launch: None,
             battery: None,
             media: None,
-            chromium_tabs: None,
+            browser_tabs: None,
             icon_width: None,
             icon_height: None,
             open_layer: None,
@@ -273,7 +286,7 @@ fn load_config() -> Result<(Config, LayerStore)> {
             launch: None,
             battery: None,
             media: None,
-            chromium_tabs: None,
+            browser_tabs: None,
             icon_width: None,
             icon_height: None,
             open_layer: Some("volume".into()),
@@ -291,7 +304,7 @@ fn load_config() -> Result<(Config, LayerStore)> {
             launch: None,
             battery: None,
             media: None,
-            chromium_tabs: None,
+            browser_tabs: None,
             icon_width: None,
             icon_height: None,
             open_layer: Some("brightness".into()),
@@ -311,7 +324,7 @@ fn load_config() -> Result<(Config, LayerStore)> {
         launch: None,
         battery: None,
         media: Some("active".into()),
-        chromium_tabs: None,
+        browser_tabs: None,
         icon_width: None,
         icon_height: None,
         open_layer: None,
@@ -331,7 +344,7 @@ fn load_config() -> Result<(Config, LayerStore)> {
             launch: None,
             battery: None,
             media: Some("active".into()),
-            chromium_tabs: None,
+            browser_tabs: None,
             icon_width: None,
             icon_height: None,
             open_layer: None,
@@ -349,7 +362,7 @@ fn load_config() -> Result<(Config, LayerStore)> {
             launch: None,
             battery: None,
             media: None,
-            chromium_tabs: None,
+            browser_tabs: None,
             icon_width: None,
             icon_height: None,
             open_layer: None,
@@ -358,7 +371,7 @@ fn load_config() -> Result<(Config, LayerStore)> {
         },
     ])
     .context("building the media-overlay layer")?;
-    let chromium_tabs_layer = FunctionLayer::with_config(vec![ButtonConfig {
+    let browser_tabs_layer = FunctionLayer::with_config(vec![ButtonConfig {
         icon: None,
         text: None,
         theme: None,
@@ -369,15 +382,15 @@ fn load_config() -> Result<(Config, LayerStore)> {
         launch: None,
         battery: None,
         media: None,
-        chromium_tabs: Some("active".into()),
+        browser_tabs: Some("active".into()),
         icon_width: None,
         icon_height: None,
         open_layer: None,
         push_layer: None,
         pop_layer: None,
     }])
-    .context("building the chromium-tabs layer")?;
-    let chromium_tabs_overlay_layer = FunctionLayer::with_config(vec![
+    .context("building the browser-tabs layer")?;
+    let browser_tabs_overlay_layer = FunctionLayer::with_config(vec![
         ButtonConfig {
             icon: None,
             text: None,
@@ -389,7 +402,7 @@ fn load_config() -> Result<(Config, LayerStore)> {
             launch: None,
             battery: None,
             media: None,
-            chromium_tabs: Some("active".into()),
+            browser_tabs: Some("active".into()),
             icon_width: None,
             icon_height: None,
             open_layer: None,
@@ -407,7 +420,7 @@ fn load_config() -> Result<(Config, LayerStore)> {
             launch: None,
             battery: None,
             media: None,
-            chromium_tabs: None,
+            browser_tabs: None,
             icon_width: None,
             icon_height: None,
             open_layer: None,
@@ -415,7 +428,7 @@ fn load_config() -> Result<(Config, LayerStore)> {
             pop_layer: Some(true),
         },
     ])
-    .context("building the chromium-tabs-overlay layer")?;
+    .context("building the browser-tabs-overlay layer")?;
     let mut terminal_nvim_debug_cells = vec![Cell {
         stretch: 1,
         widget: Widget::Button(Button::new(Box::new(DapContinuePauseButton::new()?))),
@@ -556,7 +569,17 @@ fn load_config() -> Result<(Config, LayerStore)> {
             widget: Widget::Button(Button::new(Box::new(KeyButton::new_launch_icon(
                 "/usr/share/icons/hicolor/64x64/apps/chromium.png",
                 None::<&str>,
-                "chromium --remote-debugging-address=127.0.0.1 --remote-debugging-port=9222",
+                "chromium --remote-debugging-port=9223",
+                launcher_icon_size,
+                launcher_icon_size,
+            )?))),
+        },
+        Cell {
+            stretch: 1,
+            widget: Widget::Button(Button::new(Box::new(KeyButton::new_launch_icon(
+                "/usr/share/icons/hicolor/64x64/apps/zen-browser.png",
+                None::<&str>,
+                "zen-browser --remote-debugging-port=9222",
                 launcher_icon_size,
                 launcher_icon_size,
             )?))),
@@ -599,11 +622,11 @@ fn load_config() -> Result<(Config, LayerStore)> {
             launch: None,
             battery: None,
             media: None,
-            chromium_tabs: None,
+            browser_tabs: None,
             icon_width: None,
             icon_height: None,
             open_layer: None,
-            push_layer: Some("chromium-tabs-overlay".into()),
+            push_layer: Some("browser-tabs-overlay".into()),
             pop_layer: None,
         },
         ButtonConfig {
@@ -617,7 +640,7 @@ fn load_config() -> Result<(Config, LayerStore)> {
             launch: None,
             battery: None,
             media: None,
-            chromium_tabs: None,
+            browser_tabs: None,
             icon_width: None,
             icon_height: None,
             open_layer: Some("volume".into()),
@@ -635,7 +658,7 @@ fn load_config() -> Result<(Config, LayerStore)> {
             launch: None,
             battery: None,
             media: None,
-            chromium_tabs: None,
+            browser_tabs: None,
             icon_width: None,
             icon_height: None,
             open_layer: Some("brightness".into()),
@@ -653,7 +676,7 @@ fn load_config() -> Result<(Config, LayerStore)> {
     registry.insert("global-right-tabs".to_string(), global_right_tabs_layer);
     registry.insert("media-active".to_string(), media_active_layer);
     registry.insert("media-overlay".to_string(), media_overlay_layer);
-    registry.insert("chromium-tabs".to_string(), chromium_tabs_layer);
+    registry.insert("browser-tabs".to_string(), browser_tabs_layer);
     registry.insert("terminal-nvim".to_string(), terminal_nvim_layer);
     registry.insert("terminal-nvim-debug".to_string(), terminal_nvim_debug_layer);
     registry.insert("terminal-nvim-test".to_string(), terminal_nvim_test_layer);
@@ -665,9 +688,10 @@ fn load_config() -> Result<(Config, LayerStore)> {
     registry.insert("terminal-pi".to_string(), terminal_pi_layer);
     registry.insert("app-launcher".to_string(), app_launcher_layer);
     registry.insert(
-        "chromium-tabs-overlay".to_string(),
-        chromium_tabs_overlay_layer,
+        "browser-tabs-overlay".to_string(),
+        browser_tabs_overlay_layer,
     );
+    canonicalize_app_layers(&mut base.app_layers);
     for (name, layer) in base.layers.take().unwrap_or_default() {
         registry.insert(
             name.clone(),
@@ -809,5 +833,37 @@ impl ConfigManager {
     }
     pub fn fd(&self) -> &impl AsFd {
         &self.inotify_fd
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{canonicalize_app_layers, ButtonConfig};
+    use std::collections::HashMap;
+
+    #[test]
+    fn canonicalizes_legacy_browser_app_layers() {
+        let mut layers = Some(HashMap::from([
+            ("chromium".to_string(), "chromium-tabs".to_string()),
+            ("cider".to_string(), "media-active".to_string()),
+        ]));
+        canonicalize_app_layers(&mut layers);
+        let layers = layers.unwrap();
+        assert_eq!(
+            layers.get("chromium").map(String::as_str),
+            Some("browser-tabs")
+        );
+        assert_eq!(
+            layers.get("cider").map(String::as_str),
+            Some("media-active")
+        );
+    }
+
+    #[test]
+    fn accepts_generic_and_legacy_browser_tab_keys() {
+        let generic: ButtonConfig = toml::from_str("BrowserTabs = \"active\"").unwrap();
+        let legacy: ButtonConfig = toml::from_str("ChromiumTabs = \"active\"").unwrap();
+        assert_eq!(generic.browser_tabs.as_deref(), Some("active"));
+        assert_eq!(legacy.browser_tabs.as_deref(), Some("active"));
     }
 }

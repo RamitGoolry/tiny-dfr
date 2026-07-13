@@ -21,7 +21,7 @@ use std::{
 
 use crate::action::{Action, Edge};
 use crate::backlight::BacklightManager;
-use crate::chromium::{ChromiumClient, ChromiumTabsState};
+use crate::browser::{BrowserClient, BrowserKind, BrowserMediaTiming, BrowserTabsState};
 use crate::config::{Config, ConfigManager};
 use crate::display::DrmBackend;
 use crate::event::AppEvent;
@@ -46,7 +46,7 @@ const GLOBAL_RIGHT_MEDIA_LAYER: &str = "global-right-media";
 const GLOBAL_RIGHT_TABS_LAYER: &str = "global-right-tabs";
 const MEDIA_ACTIVE_LAYER: &str = "media-active";
 const MEDIA_OVERLAY_LAYER: &str = "media-overlay";
-const CHROMIUM_TABS_LAYER: &str = "chromium-tabs";
+const BROWSER_TABS_LAYER: &str = "browser-tabs";
 const TERMINAL_NVIM_LAYER: &str = "terminal-nvim";
 const TERMINAL_NVIM_DEBUG_LAYER: &str = "terminal-nvim-debug";
 const TERMINAL_NVIM_TEST_LAYER: &str = "terminal-nvim-test";
@@ -76,7 +76,7 @@ pub(crate) struct App {
     /// PipeWire default sink volume, driven by the volume slider.
     volume: VolumeMixer,
     mpris: MprisClient,
-    chromium: ChromiumClient,
+    browser: BrowserClient,
     terminal: TerminalContextClient,
     remote: RemoteClient,
     nvim: NvimBridgeClient,
@@ -99,9 +99,24 @@ pub(crate) struct App {
     last: Instant,
 }
 
-fn media_is_chromium(player: &str) -> bool {
+fn media_is_browser(player: &str) -> bool {
     let player = player.to_ascii_lowercase();
-    player.contains("chromium") || player.contains("chrome")
+    player.contains("chromium")
+        || player.contains("chrome")
+        || player.contains("firefox")
+        || player.contains("zen")
+}
+
+fn supplement_media_timing(media: &mut MediaState, timing: Option<BrowserMediaTiming>) {
+    let Some(timing) = timing else {
+        return;
+    };
+    if timing.length_us > 0.0 {
+        media.length_us = timing.length_us;
+    }
+    if timing.position_us >= 0.0 {
+        media.position_us = timing.position_us;
+    }
 }
 
 fn titles_probably_match(media_title: &str, focused_title: &str) -> bool {
@@ -178,7 +193,7 @@ impl App {
         // In-process PipeWire volume via wpctl (see volume.rs); spawns its apply thread.
         let volume = VolumeMixer::new();
         let mpris = MprisClient::new();
-        let chromium = ChromiumClient::new(None);
+        let browser = BrowserClient::new();
         let terminal = TerminalContextClient::new();
         let remote = RemoteClient::new();
         let nvim = NvimBridgeClient::new();
@@ -221,19 +236,19 @@ impl App {
             .set(key::MEDIA_ACTIVE_POSITION, Value::Number(0.0))
             .expect("built-in Store key must be valid");
         runtime
-            .set(key::CHROMIUM_MEDIA_ACTIVE, Value::Bool(false))
+            .set(key::BROWSER_MEDIA_ACTIVE, Value::Bool(false))
             .expect("built-in Store key must be valid");
         runtime
-            .set(key::CHROMIUM_TABS_AVAILABLE, Value::Bool(false))
+            .set(key::BROWSER_TABS_AVAILABLE, Value::Bool(false))
             .expect("built-in Store key must be valid");
         runtime
-            .set(key::CHROMIUM_TABS_JSON, Value::Text("[]".to_string()))
+            .set(key::BROWSER_TABS_JSON, Value::Text("[]".to_string()))
             .expect("built-in Store key must be valid");
         runtime
-            .set(key::CHROMIUM_TABS_COUNT, Value::Number(0.0))
+            .set(key::BROWSER_TABS_COUNT, Value::Number(0.0))
             .expect("built-in Store key must be valid");
         runtime
-            .set(key::CHROMIUM_TABS_ACTIVE_INDEX, Value::Number(-1.0))
+            .set(key::BROWSER_TABS_ACTIVE_INDEX, Value::Number(-1.0))
             .expect("built-in Store key must be valid");
         runtime
             .set(key::NVIM_BRIDGE_AVAILABLE, Value::Bool(false))
@@ -360,7 +375,7 @@ impl App {
             kbd,
             volume,
             mpris,
-            chromium,
+            browser,
             terminal,
             remote,
             nvim,
@@ -389,8 +404,8 @@ impl App {
             .set(key::HARDWARE_KBD_ILLUM, Value::Number(self.kbd.level()))?;
         let old_center = self.center_layer().map(str::to_string);
         let old_right = self.global_right_layer();
+        self.refresh_browser_tabs(false)?;
         self.refresh_media()?;
-        self.refresh_chromium_tabs(false)?;
         self.refresh_terminal()?;
         let remote_changed = self.refresh_remote();
         self.refresh_nvim_bridge()?;
@@ -405,7 +420,16 @@ impl App {
     }
 
     fn refresh_media(&mut self) -> Result<()> {
-        if let Some(media) = self.mpris.refresh()? {
+        if let Some(mut media) = self.mpris.refresh()? {
+            if media_is_browser(&media.player) {
+                let timing = self
+                    .browser
+                    .media_timing()
+                    .inspect_err(|err| eprintln!("browser media timing: {err:#}"))
+                    .ok()
+                    .flatten();
+                supplement_media_timing(&mut media, timing);
+            }
             self.store_media(media)?;
         } else {
             self.runtime
@@ -423,43 +447,44 @@ impl App {
             self.runtime
                 .set(key::MEDIA_ACTIVE_POSITION, Value::Number(0.0))?;
             self.runtime
-                .set(key::CHROMIUM_MEDIA_ACTIVE, Value::Bool(false))?;
+                .set(key::BROWSER_MEDIA_ACTIVE, Value::Bool(false))?;
         }
         Ok(())
     }
 
-    fn refresh_chromium_tabs(&mut self, force: bool) -> Result<()> {
+    fn refresh_browser_tabs(&mut self, force: bool) -> Result<()> {
         let focused_title = self
             .runtime
             .text(key::CONTEXT_FOCUS_TITLE)
             .unwrap_or("")
             .to_string();
-        let state = match self.chromium.refresh_tabs(&focused_title, force) {
+        let kind = self.focused_browser_kind();
+        let state = match self.browser.refresh_tabs(kind, &focused_title, force) {
             Ok(state) => state,
             Err(err) => {
-                eprintln!("chromium: {err:#}");
-                self.chromium.unavailable_state()
+                eprintln!("browser ({}): {err:#}", self.browser.active_protocol_name());
+                BrowserTabsState::unavailable()
             }
         };
-        self.store_chromium_tabs(state)
+        self.store_browser_tabs(state)
     }
 
-    fn store_chromium_tabs(&mut self, state: ChromiumTabsState) -> Result<()> {
+    fn store_browser_tabs(&mut self, state: BrowserTabsState) -> Result<()> {
         self.runtime
-            .set(key::CHROMIUM_TABS_AVAILABLE, Value::Bool(state.available))?;
+            .set(key::BROWSER_TABS_AVAILABLE, Value::Bool(state.available))?;
         self.runtime
-            .set(key::CHROMIUM_TABS_JSON, Value::Text(state.tabs_json))?;
+            .set(key::BROWSER_TABS_JSON, Value::Text(state.tabs_json))?;
         self.runtime
-            .set(key::CHROMIUM_TABS_COUNT, Value::Number(state.count as f64))?;
+            .set(key::BROWSER_TABS_COUNT, Value::Number(state.count as f64))?;
         self.runtime.set(
-            key::CHROMIUM_TABS_ACTIVE_INDEX,
+            key::BROWSER_TABS_ACTIVE_INDEX,
             Value::Number(state.active_index.map(|idx| idx as f64).unwrap_or(-1.0)),
         )?;
         Ok(())
     }
 
     fn store_media(&mut self, media: MediaState) -> Result<()> {
-        let chromium_media_active = media_is_chromium(&media.player);
+        let browser_media_active = media_is_browser(&media.player);
         self.runtime
             .set(key::MEDIA_ACTIVE_PLAYER, Value::Text(media.player))?;
         self.runtime
@@ -474,10 +499,8 @@ impl App {
             .set(key::MEDIA_ACTIVE_LENGTH, Value::Number(media.length_us))?;
         self.runtime
             .set(key::MEDIA_ACTIVE_POSITION, Value::Number(media.position_us))?;
-        self.runtime.set(
-            key::CHROMIUM_MEDIA_ACTIVE,
-            Value::Bool(chromium_media_active),
-        )?;
+        self.runtime
+            .set(key::BROWSER_MEDIA_ACTIVE, Value::Bool(browser_media_active))?;
         Ok(())
     }
 
@@ -1121,8 +1144,8 @@ impl App {
                         .registry
                         .contains_key(TERMINAL_PI_LAYER)
                         .then_some(TERMINAL_PI_LAYER)
-                } else if self.is_chromium_focused() {
-                    if self.chromium_media_on_focused_tab() {
+                } else if self.is_browser_focused() {
+                    if self.browser_media_on_focused_tab() {
                         self.store
                             .registry
                             .contains_key(MEDIA_ACTIVE_LAYER)
@@ -1130,8 +1153,8 @@ impl App {
                     } else {
                         self.store
                             .registry
-                            .contains_key(CHROMIUM_TABS_LAYER)
-                            .then_some(CHROMIUM_TABS_LAYER)
+                            .contains_key(BROWSER_TABS_LAYER)
+                            .then_some(BROWSER_TABS_LAYER)
                     }
                 } else {
                     self.rstate
@@ -1164,9 +1187,12 @@ impl App {
             .is_empty()
     }
 
-    fn is_chromium_focused(&self) -> bool {
-        let class = self.focused_class_lower();
-        class.contains("chromium") || class.contains("chrome")
+    fn focused_browser_kind(&self) -> Option<BrowserKind> {
+        BrowserKind::from_window_class(&self.focused_class_lower())
+    }
+
+    fn is_browser_focused(&self) -> bool {
+        self.focused_browser_kind().is_some()
     }
 
     fn is_ghostty_focused(&self) -> bool {
@@ -1230,14 +1256,14 @@ impl App {
                 || self.runtime.bool(key::NVIM_DBUI_IN_BUFFER).unwrap_or(false))
     }
 
-    fn chromium_media_active(&self) -> bool {
+    fn browser_media_active(&self) -> bool {
         self.runtime
-            .bool(key::CHROMIUM_MEDIA_ACTIVE)
+            .bool(key::BROWSER_MEDIA_ACTIVE)
             .unwrap_or(false)
     }
 
-    fn chromium_media_on_focused_tab(&self) -> bool {
-        if !self.is_chromium_focused() || !self.chromium_media_active() {
+    fn browser_media_on_focused_tab(&self) -> bool {
+        if !self.is_browser_focused() || !self.browser_media_active() {
             return false;
         }
         let media_title = self.runtime.text(key::MEDIA_ACTIVE_TITLE).unwrap_or("");
@@ -1255,7 +1281,7 @@ impl App {
 
     fn should_show_global_media_button(&self) -> bool {
         self.media_available()
-            && !self.chromium_media_on_focused_tab()
+            && !self.browser_media_on_focused_tab()
             && !matches!(
                 self.center_layer(),
                 Some(MEDIA_ACTIVE_LAYER) | Some(MEDIA_OVERLAY_LAYER)
@@ -1263,7 +1289,7 @@ impl App {
     }
 
     fn global_right_layer(&self) -> &'static str {
-        if self.is_chromium_focused() && self.chromium_media_on_focused_tab() {
+        if self.is_browser_focused() && self.browser_media_on_focused_tab() {
             GLOBAL_RIGHT_TABS_LAYER
         } else if self.should_show_global_media_button() {
             GLOBAL_RIGHT_MEDIA_LAYER
@@ -1297,7 +1323,7 @@ impl App {
                 .unwrap_or(false)
             || self
                 .runtime
-                .is_dirty(key::CHROMIUM_MEDIA_ACTIVE)
+                .is_dirty(key::BROWSER_MEDIA_ACTIVE)
                 .unwrap_or(false)
             || self.runtime.is_dirty(key::NVIM_DAP_ACTIVE).unwrap_or(false)
             || self.runtime.is_dirty(key::NVIM_DAP_STATE).unwrap_or(false)
@@ -1525,7 +1551,7 @@ impl App {
                             Action::OpenModal(_)
                                 | Action::PushLayer(_)
                                 | Action::PopLayer
-                                | Action::ChromiumActivateTab(_)
+                                | Action::BrowserActivateTab(_)
                                 | Action::NvimBridge(_)
                                 | Action::NvimDbConnect(_),
                         )
@@ -1655,9 +1681,9 @@ impl App {
                 self.runtime
                     .set(key::MEDIA_ACTIVE_POSITION, Value::Number(position_us))?;
             }
-            Action::ChromiumActivateTab(id) => {
-                self.chromium.activate_tab(&id)?;
-                self.refresh_chromium_tabs(true)?;
+            Action::BrowserActivateTab(id) => {
+                self.browser.activate_tab(&id)?;
+                self.refresh_browser_tabs(true)?;
                 self.needs_complete_redraw = true;
             }
             Action::LaunchApp(command) => {

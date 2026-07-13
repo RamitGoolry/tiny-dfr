@@ -23,11 +23,11 @@ pub(crate) mod key {
     pub(crate) const MEDIA_ACTIVE_ART_URL: &str = "media.active.art_url";
     pub(crate) const MEDIA_ACTIVE_LENGTH: &str = "media.active.length";
     pub(crate) const MEDIA_ACTIVE_POSITION: &str = "media.active.position";
-    pub(crate) const CHROMIUM_MEDIA_ACTIVE: &str = "chromium.media.active";
-    pub(crate) const CHROMIUM_TABS_AVAILABLE: &str = "chromium.tabs.available";
-    pub(crate) const CHROMIUM_TABS_JSON: &str = "chromium.tabs.json";
-    pub(crate) const CHROMIUM_TABS_COUNT: &str = "chromium.tabs.count";
-    pub(crate) const CHROMIUM_TABS_ACTIVE_INDEX: &str = "chromium.tabs.active_index";
+    pub(crate) const BROWSER_MEDIA_ACTIVE: &str = "browser.media.active";
+    pub(crate) const BROWSER_TABS_AVAILABLE: &str = "browser.tabs.available";
+    pub(crate) const BROWSER_TABS_JSON: &str = "browser.tabs.json";
+    pub(crate) const BROWSER_TABS_COUNT: &str = "browser.tabs.count";
+    pub(crate) const BROWSER_TABS_ACTIVE_INDEX: &str = "browser.tabs.active_index";
     pub(crate) const NVIM_BRIDGE_AVAILABLE: &str = "nvim.bridge.available";
     pub(crate) const NVIM_BRIDGE_SOCKET: &str = "nvim.bridge.socket";
     pub(crate) const NVIM_PID: &str = "nvim.pid";

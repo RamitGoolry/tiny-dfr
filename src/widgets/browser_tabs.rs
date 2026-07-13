@@ -18,7 +18,7 @@ const MIN_CHIP_WIDTH: f64 = 170.0;
 const MAX_VISIBLE_TABS: usize = 8;
 
 #[derive(Debug, Deserialize)]
-struct ChromiumTab {
+struct BrowserTab {
     id: String,
     title: String,
     url: String,
@@ -26,14 +26,14 @@ struct ChromiumTab {
     active: bool,
 }
 
-pub(crate) struct ChromiumTabsWidget {
+pub(crate) struct BrowserTabsWidget {
     changed: bool,
     favicons: HashMap<String, Option<ImageSurface>>,
 }
 
-impl ChromiumTabsWidget {
-    pub(crate) fn new() -> ChromiumTabsWidget {
-        ChromiumTabsWidget {
+impl BrowserTabsWidget {
+    pub(crate) fn new() -> BrowserTabsWidget {
+        BrowserTabsWidget {
             changed: true,
             favicons: HashMap::new(),
         }
@@ -41,12 +41,10 @@ impl ChromiumTabsWidget {
 
     pub(crate) fn needs_redraw(&self, store: &Store) -> bool {
         self.changed
+            || store.is_dirty(key::BROWSER_TABS_AVAILABLE).unwrap_or(false)
+            || store.is_dirty(key::BROWSER_TABS_JSON).unwrap_or(false)
             || store
-                .is_dirty(key::CHROMIUM_TABS_AVAILABLE)
-                .unwrap_or(false)
-            || store.is_dirty(key::CHROMIUM_TABS_JSON).unwrap_or(false)
-            || store
-                .is_dirty(key::CHROMIUM_TABS_ACTIVE_INDEX)
+                .is_dirty(key::BROWSER_TABS_ACTIVE_INDEX)
                 .unwrap_or(false)
     }
 
@@ -66,7 +64,7 @@ impl ChromiumTabsWidget {
                 return indices
                     .get(visible_idx)
                     .and_then(|idx| tabs.get(*idx))
-                    .map(|tab| Action::ChromiumActivateTab(tab.id.clone()));
+                    .map(|tab| Action::BrowserActivateTab(tab.id.clone()));
             }
         }
         None
@@ -94,11 +92,11 @@ impl ChromiumTabsWidget {
             c.fill()?;
         }
 
-        if !store.bool(key::CHROMIUM_TABS_AVAILABLE).unwrap_or(false) {
+        if !store.bool(key::BROWSER_TABS_AVAILABLE).unwrap_or(false) {
             draw_centered_text(
                 c,
                 region,
-                "Chromium tabs unavailable",
+                "Browser tabs unavailable",
                 26.0,
                 (0.45, 0.45, 0.48),
             )?;
@@ -108,7 +106,7 @@ impl ChromiumTabsWidget {
 
         let tabs = read_tabs(store);
         if tabs.is_empty() {
-            draw_centered_text(c, region, "No Chromium tabs", 26.0, (0.45, 0.45, 0.48))?;
+            draw_centered_text(c, region, "No browser tabs", 26.0, (0.45, 0.45, 0.48))?;
             self.changed = false;
             return Ok(damage(region, complete_redraw, top, bot, radius));
         }
@@ -142,12 +140,12 @@ impl ChromiumTabsWidget {
     }
 }
 
-fn read_tabs(store: &Store) -> Vec<ChromiumTab> {
-    let json = store.text(key::CHROMIUM_TABS_JSON).unwrap_or("[]");
+fn read_tabs(store: &Store) -> Vec<BrowserTab> {
+    let json = store.text(key::BROWSER_TABS_JSON).unwrap_or("[]");
     serde_json::from_str(json).unwrap_or_default()
 }
 
-fn visible_indices(tabs: &[ChromiumTab], visible_count: usize) -> Vec<usize> {
+fn visible_indices(tabs: &[BrowserTab], visible_count: usize) -> Vec<usize> {
     if visible_count >= tabs.len() {
         return (0..tabs.len()).collect();
     }
@@ -173,7 +171,7 @@ fn draw_tab_chip(
     favicons: &mut HashMap<String, Option<ImageSurface>>,
     c: &Context,
     region: &Region,
-    tab: &ChromiumTab,
+    tab: &BrowserTab,
     left: f64,
     right: f64,
 ) -> Result<()> {
@@ -237,7 +235,7 @@ fn favicon_surface<'a>(
     }
     if !favicons.contains_key(url) {
         let surface = fetch_favicon(url)
-            .inspect_err(|err| eprintln!("chromium favicon: {url}: {err:#}"))
+            .inspect_err(|err| eprintln!("browser favicon: {url}: {err:#}"))
             .ok();
         favicons.insert(url.to_string(), surface);
     }

@@ -3,17 +3,17 @@
 //! the three backend traits (the *fill* — behavior within a kind). Every backend
 //! reads a shared `&Store` to render and can only return an `Action` to act, so
 //! the App stays the single effectful place.
+pub(crate) mod browser_tabs;
 pub(crate) mod button;
-pub(crate) mod chromium_tabs;
 pub(crate) mod dbui_connections;
 pub(crate) mod indicator;
 pub(crate) mod media;
 pub(crate) mod slider;
 
+pub(crate) use browser_tabs::BrowserTabsWidget;
 pub(crate) use button::{
     Button, DapContinuePauseButton, PiModelButton, PiThinkingButton, PiWorkflowModeButton,
 };
-pub(crate) use chromium_tabs::ChromiumTabsWidget;
 pub(crate) use dbui_connections::DbuiConnectionsWidget;
 pub(crate) use media::MediaWidget;
 pub(crate) use slider::{BrightnessSlider, KbdIllumSlider, Slider, VolumeSlider};
@@ -125,7 +125,7 @@ pub(crate) enum Widget {
     Button(Button),
     Slider(Slider),
     Media(MediaWidget),
-    ChromiumTabs(ChromiumTabsWidget),
+    BrowserTabs(BrowserTabsWidget),
     DbuiConnections(DbuiConnectionsWidget),
     Indicator(Box<dyn IndicatorBackend>),
     Spacer,
@@ -153,8 +153,8 @@ impl Widget {
             )?)))
         } else if cfg.media.is_some() {
             Ok(Widget::Media(MediaWidget::new()))
-        } else if cfg.chromium_tabs.is_some() {
-            Ok(Widget::ChromiumTabs(ChromiumTabsWidget::new()))
+        } else if cfg.browser_tabs.is_some() {
+            Ok(Widget::BrowserTabs(BrowserTabsWidget::new()))
         } else if let Some(battery_mode) = cfg.battery {
             if let Some(battery) = find_battery_device() {
                 Ok(Widget::Indicator(Box::new(BatteryIndicator::new(
@@ -184,7 +184,7 @@ impl Widget {
             Widget::Button(b) => b.changed(store),
             Widget::Slider(sl) => sl.changed,
             Widget::Media(media) => media.needs_redraw(store),
-            Widget::ChromiumTabs(tabs) => tabs.needs_redraw(store),
+            Widget::BrowserTabs(tabs) => tabs.needs_redraw(store),
             Widget::DbuiConnections(dbs) => dbs.needs_redraw(store),
             Widget::Indicator(i) => i.needs_redraw(store),
             Widget::Spacer => false,
@@ -199,7 +199,7 @@ impl Widget {
             Widget::Button(_)
                 | Widget::Slider(_)
                 | Widget::Media(_)
-                | Widget::ChromiumTabs(_)
+                | Widget::BrowserTabs(_)
                 | Widget::DbuiConnections(_)
         )
     }
@@ -217,7 +217,7 @@ impl Widget {
             Widget::Button(b) => b.draw(c, cfg, region, store, complete_redraw),
             Widget::Slider(s) => Ok(s.draw(c, width, region.height, complete_redraw)),
             Widget::Media(m) => m.draw(c, cfg, region, store, complete_redraw),
-            Widget::ChromiumTabs(t) => t.draw(c, cfg, region, store, complete_redraw),
+            Widget::BrowserTabs(t) => t.draw(c, cfg, region, store, complete_redraw),
             Widget::DbuiConnections(dbs) => dbs.draw(c, cfg, region, store, complete_redraw),
             Widget::Indicator(b) => b.draw(c, region, store, complete_redraw),
             Widget::Spacer => Ok(vec![]),
